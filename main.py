@@ -158,8 +158,8 @@ def train_autoencoder(args):
         encoded_signal = encoder(one_hot_messages)
         
         # Channel
-        distorted_signal = apply_phase_noise(encoded_signal)
-        distorted_signal = apply_frequency_offset(distorted_signal)
+        distorted_signal = apply_phase_noise(encoded_signal, max_phase_deg=args.max_phase_deg)
+        distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
         noisy_signal = add_awgn(distorted_signal, current_snr_db)
         
         # Receiver
@@ -262,6 +262,8 @@ if __name__ == "__main__":
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--snr-start', type=float, default=10.0, help='Start SNR in dB')
     parser.add_argument('--snr-end', type=float, default=-20.0, help='End SNR in dB')
+    parser.add_argument('--max-phase-deg', type=float, default=5.0, help='Max phase ambiguity in degrees (default: 5.0 for stable clock)')
+    parser.add_argument('--max-freq-step', type=float, default=0.05, help='Max frequency drift step (default: 0.05 for TCXO-like drift)')
     args = parser.parse_args()
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -323,8 +325,8 @@ if __name__ == "__main__":
             one_hot_messages = torch.eye(M).to(DEVICE)[messages_indices]
 
             encoded_signal = encoder_model(one_hot_messages)
-            distorted_signal = apply_phase_noise(encoded_signal)
-            distorted_signal = apply_frequency_offset(distorted_signal)
+            distorted_signal = apply_phase_noise(encoded_signal, max_phase_deg=args.max_phase_deg)
+            distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
             noisy_signal = add_awgn(distorted_signal, test_snr_db)
             decoded_logits = decoder_model(noisy_signal)
 

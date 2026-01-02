@@ -76,3 +76,7 @@ With simple constellations working, we must now move towards waveforms that can 
 * **Speed:** "Modest" throughput (50 bps – 500 bps).
 * **Bandwidth:** Fits within a standard 3 kHz (SSB) or 12.5 kHz (Narrow FM) channel.
 
+## 7. Documentation Standards
+
+*   **README.md**: Maintain a "Hypotheses and Choices" section. Every physical parameter added to the simulation (Phase Noise, Drift, Bandwidth) must be grounded in real-world Ham Radio hardware specifications (e.g., TCXO ppm, 12.5kHz channel spacing).
+

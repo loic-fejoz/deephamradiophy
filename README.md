@@ -17,6 +17,17 @@ The system implements an end-to-end differentiable DSP pipeline:
 5.  **Decoder (RX):** Neural network mapping noisy samples back to message probabilities.
 6.  **Loss:** Categorical Cross-Entropy.
 
+## Hypotheses and Choices
+
+To ground the autoencoder in real-world Ham Radio physics, we make the following assumptions:
+
+| Parameter | Default Value | Hypothesis / Choice |
+| :--- | :--- | :--- |
+| **Phase Noise** | $5.0^\circ$ | Represents the integrated phase jitter of a locked synthesizer in a 12.5 kHz narrowband FM channel. |
+| **Freq Offset** | $0.05$ | Simulates a $\pm 1$ ppm TCXO drift (approx. $150$ Hz error at $144$ MHz/VHF) under a $12$ kHz sampling assumption. |
+| **Latency ($N$)** | $16$ | Spreading factor for $K=4$. We assume a low-speed robust payload where bandwidth can be traded for sensitivity. |
+| **SNR range** | $+10 \to -20$ dB | The goal is to discover modulations that remain decodable even when the signal is deep in the noise floor. |
+
 ## Technical Stack
 
 *   **Python 3.12+**
