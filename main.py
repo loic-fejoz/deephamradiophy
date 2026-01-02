@@ -15,7 +15,7 @@ BATCH_SIZE = 1024
 NUM_EPOCHS = 2000
 LEARNING_RATE = 0.001
 SNR_START_DB = 10.0 # Start training at high SNR
-SNR_END_DB = 0.0  # End training at low SNR (sub-noise floor)
+SNR_END_DB = -20.0  # End training at low SNR (sub-noise floor)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")

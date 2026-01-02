@@ -36,24 +36,24 @@ The goal of the first script is to prove the machine can learn a resilient const
 
 ### Implementation Checklist:
 
-* [ ] Implement `Encoder` with 2-3 hidden layers.
-* [ ] Implement `add_awgn` with linear SNR conversion.
-* [ ] Implement **Noise Curriculum**: Start at +10dB, decay to -15dB over 1000 epochs.
-* [ ] Implement `visualize_learned_waveform`: Plot I/Q temporal signals and a Scatter plot of the learned "constellation."
+* [x] Implement `Encoder` with 2-3 hidden layers.
+* [x] Implement `add_awgn` with linear SNR conversion.
+* [x] Implement **Noise Curriculum**: Linear interpolation of SNR over training.
+* [x] Implement `visualize_learned_waveform`: Plot I/Q temporal signals and a Scatter plot of the learned "constellation."
 
+## 5. Current Focus: Robustness & Real-World Bridge
 
-## 5. Next Steps & TODOs (Research Roadmap)
+With simple constellations working, we must now move towards waveforms that can survive hardware impairments.
 
-### Step 2: Spectral Analysis & MFSK Discovery
+### Step 2: Stochastic Impairments (Phase & Frequency)
+*   **TODO:** Add stochastic **Phase Noise** and **Frequency Offset** to the channel layer.
+*   **Goal:** Force the Decoder to become invariant to rotation and small frequency shifts.
+*   **Metric:** Measure BER degradation vs Frequency Offset (Hz).
 
-* [ ] **TODO:** Add an FFT block to the visualization suite.
-* [ ] **Goal:** Check if the AI is using Frequency Diversity (MFSK) or Time Diversity (Spreading).
-* [ ] **Constraint:** Introduce a "Bandwidth Mask" to penalize the AI for using frequencies outside a designated range.
-
-### Step 3: Timing & Sync (The "Real World" Bridge)
-
-* [ ] **TODO:** Implement a random time-delay in the channel.
-* [ ] **Goal:** Force the AI to discover/learn a "Preamble" or a self-synchronizing waveform (like a Zadoff-Chu sequence or Barker code).
+### Step 3: Spectral Masking & Bandwidth Efficiency
+*   **TODO:** Add an FFT-based penalty to the Loss Function.
+*   **Goal:** Keep the AI from "spreading" into neighbors' channels. Ensure the waveform fits within a 3kHz or 12.5kHz mask.
+*   **Constraint:** Use a 1D-CNN or larger $N$ to discover frequency-diversity schemes.
 
 ### Step 4: Multipath & Fading (Terrestrial Modeling)
 
@@ -65,10 +65,14 @@ The goal of the first script is to prove the machine can learn a resilient const
 * [ ] **TODO:** Add a penalty to the Loss Function for high Peak-to-Average Power Ratio.
 * [ ] **Goal:** Ensure the resulting waveform can be transmitted by cheap, non-linear Class-C amateur radio amplifiers without massive distortion.
 
+### Step 6: Timing Discovery & Synchronization
+*   **TODO:** Introduce random **Sample Offsets** (delay) in the channel.
+*   **Goal:** The model must discover its own "Preamble" or "Sync Word" to align the message in time.
+*   **Metric:** Sync acquisition probability at low SNR.
 
-## 6. Target Metrics
+## 6. Target Metrics (Ongoing)
 
-* **Sensitivity:** Successful decode at  dB SNR (AWGN).
+* **Sensitivity:** Successful decode at $-20$ dB SNR (AWGN).
 * **Speed:** "Modest" throughput (50 bps – 500 bps).
 * **Bandwidth:** Fits within a standard 3 kHz (SSB) or 12.5 kHz (Narrow FM) channel.
 
