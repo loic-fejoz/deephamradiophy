@@ -46,13 +46,13 @@ The goal of the first script is to prove the machine can learn a resilient const
 With simple constellations working, we must now move towards waveforms that can survive hardware impairments.
 
 ### Step 2: Stochastic Impairments (Phase & Frequency)
-*   **TODO:** Add stochastic **Phase Noise** and **Frequency Offset** to the channel layer.
+*   [x] Add stochastic **Phase Noise** and **Frequency Offset** to the channel layer.
 *   **Goal:** Force the Decoder to become invariant to rotation and small frequency shifts.
 *   **Metric:** Measure BER degradation vs Frequency Offset (Hz).
 
 ### Step 3: Spectral Masking & Bandwidth Efficiency
-*   **TODO:** Add an FFT-based penalty to the Loss Function.
-*   **Goal:** Keep the AI from "spreading" into neighbors' channels. Ensure the waveform fits within a 3kHz or 12.5kHz mask.
+*   [x] Add an FFT-based penalty to the Loss Function.
+*   **Goal:** Keep the AI from "spreading" into neighbors' channels. Ensure the waveform fits within a 12.5kHz mask.
 *   **Constraint:** Use a 1D-CNN or larger $N$ to discover frequency-diversity schemes.
 
 ### Step 4: Multipath & Fading (Terrestrial Modeling)
@@ -74,7 +74,7 @@ With simple constellations working, we must now move towards waveforms that can 
 
 * **Sensitivity:** Successful decode at $-20$ dB SNR (AWGN).
 * **Speed:** "Modest" throughput (50 bps – 500 bps).
-* **Bandwidth:** Fits within a standard 3 kHz (SSB) or 12.5 kHz (Narrow FM) channel.
+* **Bandwidth:** Fits within a standard 12.5 kHz (Narrow FM) channel.
 
 ## 7. Documentation Standards
 

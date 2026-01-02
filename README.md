@@ -49,6 +49,10 @@ uv run python main.py -K 4 -N 16 --snr-end -20
 - `--snr-start`: Training start SNR in dB (default: 10)
 - `--snr-end`: Training target SNR in dB (default: -20)
 - `--epochs`: Number of training iterations (default: 2000)
+- `--bw-penalty`: Weight of the spectral penalty (default: 0.0)
+- `--bw-limit`: Fraction of total bandwidth allowed (0.0-1.0, default: 0.5)
+- `--max-phase-deg`: Max phase noise in degrees (default: 5.0)
+- `--max-freq-step`: Max frequency drift (default: 0.05)
 
 ---
 

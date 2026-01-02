@@ -125,6 +125,42 @@ def add_awgn(waveform_iq, snr_db):
     noise = torch.randn_like(waveform_iq) * noise_std
     return waveform_iq + noise
 
+def get_spectral_penalty(waveform_iq, bw_limit=0.5):
+    """
+    Computes energy outside the allowed bandwidth limit.
+    bw_limit: Fraction of the total bandwidth allowed (0.0 to 1.0).
+    """
+    batch_size, _, n_samples = waveform_iq.size()
+    if n_samples <= 1:
+        return torch.tensor(0.0, device=waveform_iq.device)
+
+    # Convert to complex representation: I + jQ
+    z = torch.complex(waveform_iq[:, 0, :], waveform_iq[:, 1, :])
+    
+    # Compute FFT
+    Z = torch.fft.fft(z, dim=1)
+    Z_shifted = torch.fft.fftshift(Z, dim=1)
+    
+    # Power Spectral Density
+    psd = torch.abs(Z_shifted)**2
+    
+    # Create mask of allowed bins (central ones)
+    total_bins = n_samples
+    allowed_bins = max(1, int(total_bins * bw_limit))
+    start_bin = (total_bins - allowed_bins) // 2
+    end_bin = start_bin + allowed_bins
+    
+    mask = torch.ones(total_bins, device=waveform_iq.device)
+    mask[start_bin:end_bin] = 0.0 # Bins inside the limit have 0 penalty
+    
+    # Energy outside the mask
+    # Normalize by total energy (N^2 in FFT domain for unit energy in time domain)
+    # We want the penalty to be the fraction of power outside the mask (0 to 1) 
+    total_energy = torch.sum(psd)
+    out_energy = torch.sum(psd * mask)
+    penalty = out_energy / (total_energy + 1e-8)
+    return penalty
+
 # --- Training Loop ---
 def train_autoencoder(args):
     M = 2**args.K
@@ -165,8 +201,12 @@ def train_autoencoder(args):
         # Receiver
         decoded_logits = decoder(noisy_signal)
 
-        # Loss Function Selection: Categorical Cross-Entropy
-        loss = criterion(decoded_logits, messages_indices)
+        # Loss Function: Categorical Cross-Entropy + Spectral Penalty
+        ce_loss = criterion(decoded_logits, messages_indices)
+        
+        bw_penalty = get_spectral_penalty(encoded_signal, bw_limit=args.bw_limit)
+        loss = ce_loss + args.bw_penalty * bw_penalty
+        
         loss.backward()
         optimizer.step()
 
@@ -252,6 +292,55 @@ def visualize_learned_waveform(encoder, all_messages_one_hot, args):
     
     plt.show()
 
+def visualize_spectrum(encoder, all_messages_one_hot, args):
+    """Computes and plots the Power Spectral Density of all learned waveforms."""
+    encoder.eval()
+    with torch.no_grad():
+        waveform_iq = encoder(all_messages_one_hot)
+    
+    batch_size, _, n_samples = waveform_iq.size()
+    if n_samples <= 1:
+        print("Skipping spectral visualization (N_SAMPLES <= 1)")
+        return
+
+    # Convert to complex and compute FFT
+    z = torch.complex(waveform_iq[:, 0, :], waveform_iq[:, 1, :])
+    Z = torch.fft.fft(z, dim=1)
+    Z_shifted = torch.fft.fftshift(Z, dim=1)
+    
+    # Average PSD over all messages
+    psd = torch.abs(Z_shifted)**2
+    avg_psd = torch.mean(psd, dim=0).cpu().numpy()
+    
+    # Frequencies (normalized to -0.5 to 0.5)
+    freqs = np.fft.fftshift(np.fft.fftfreq(n_samples))
+    
+    plt.figure(figsize=(10, 6))
+    # PSD in dB, normalized to peak
+    psd_db = 10 * np.log10(avg_psd / (np.max(avg_psd) + 1e-12) + 1e-12)
+    plt.plot(freqs, psd_db)
+    
+    # Draw mask limits
+    plt.axvline(-args.bw_limit/2, color='r', linestyle='--', label=f'Allowed BW ({args.bw_limit*100:.0f}%)')
+    plt.axvline(args.bw_limit/2, color='r', linestyle='--')
+    
+    # Fill the penalty area for clarity
+    plt.fill_between(freqs, -100, 0, where=(np.abs(freqs) > args.bw_limit/2), 
+                     color='red', alpha=0.1, label='Penalty Zone')
+    
+    plt.title(f"Normalized Power Spectral Density (N={n_samples}, BW Limit={args.bw_limit})")
+    plt.xlabel("Normalized Frequency (relative to Fs)")
+    plt.ylabel("Relative Power (dB)")
+    plt.ylim(-60, 5)
+    plt.grid(True)
+    plt.legend()
+    
+    os.makedirs("output", exist_ok=True)
+    filename = f"output/spectrum_K{args.K}_N{n_samples}_BW{args.bw_limit}.png"
+    plt.savefig(filename)
+    print(f"Spectrum figure saved to {filename}")
+    plt.show()
+
 # --- Main execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Deep-HAM Radio PHY Autoencoder Training')
@@ -264,6 +353,8 @@ if __name__ == "__main__":
     parser.add_argument('--snr-end', type=float, default=-20.0, help='End SNR in dB')
     parser.add_argument('--max-phase-deg', type=float, default=5.0, help='Max phase ambiguity in degrees (default: 5.0 for stable clock)')
     parser.add_argument('--max-freq-step', type=float, default=0.05, help='Max frequency drift step (default: 0.05 for TCXO-like drift)')
+    parser.add_argument('--bw-penalty', type=float, default=0.0, help='Weight of the spectral penalty (default: 0.0)')
+    parser.add_argument('--bw-limit', type=float, default=0.5, help='Allowed bandwidth fraction (0.0-1.0, default: 0.5)')
     args = parser.parse_args()
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -308,6 +399,9 @@ if __name__ == "__main__":
 
     # Visualize the learned waveforms (or constellations if N_SAMPLES=1)
     visualize_learned_waveform(encoder_model, all_msg_one_hot, args)
+    
+    # Visualize the spectrum
+    visualize_spectrum(encoder_model, all_msg_one_hot, args)
 
     # Example of how to evaluate BER at a specific SNR after training
     print("\nEvaluating BER at target SNR_END_DB:")
