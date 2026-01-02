@@ -4,17 +4,18 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm # For progress bars
+import os
 
 # --- Configuration Parameters ---
-K = 2           # Number of bits per message (log2(M))
+K = 3           # Number of bits per message (log2(M))
 M = 2**K        # Number of possible messages (e.g., 16-ary, so 4 bits per message)
-N_SAMPLES = 8   # Number of I/Q samples per message (bandwidth expansion factor)
+N_SAMPLES = 1   # Number of I/Q samples per message (bandwidth expansion factor)
                 # Higher N_SAMPLES allows for more complex spreading/waveform
-BATCH_SIZE = 512
+BATCH_SIZE = 1024
 NUM_EPOCHS = 2000
 LEARNING_RATE = 0.001
 SNR_START_DB = 10.0 # Start training at high SNR
-SNR_END_DB = -20.0  # End training at low SNR (sub-noise floor)
+SNR_END_DB = 0.0  # End training at low SNR (sub-noise floor)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {DEVICE}")
@@ -204,7 +205,6 @@ def visualize_learned_waveform(encoder, all_messages_one_hot):
         plt.grid(True)
         plt.axhline(0, color='black',linewidth=0.5)
         plt.axvline(0, color='black',linewidth=0.5)
-        plt.show()
     else:
         # Plot each waveform (I and Q components over time)
         # This will be more illustrative for spread spectrum/temporal codes
@@ -224,7 +224,13 @@ def visualize_learned_waveform(encoder, all_messages_one_hot):
                 plt.legend()
         plt.suptitle(f"Learned Waveforms for {M} Messages (N_SAMPLES={N_SAMPLES})", fontsize=16)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.show()
+        
+    os.makedirs("output", exist_ok=True)
+    filename = f"output/waveforms_K{K}_M{M}_N{N_SAMPLES}.png"
+    plt.savefig(filename)
+    print(f"Waveform figure saved to {filename}")
+    
+    plt.show()
 
 # --- Main execution ---
 if __name__ == "__main__":
@@ -238,18 +244,31 @@ if __name__ == "__main__":
     plt.ylabel("Loss")
 
     plt.subplot(1, 2, 2)
-    plt.plot(bers)
-    plt.title("BER History")
-    plt.xlabel("Epoch")
-    plt.ylabel("BER")
-    plt.show()
+    ax = plt.gca()
+    ax.plot(bers)
+    ax.set_title("BER History vs Epoch/SNR")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("BER")
+    
+    # Add secondary x-axis for SNR
+    # SNR curriculum is linear: current_snr_db = SNR_START_DB - (SNR_START_DB - SNR_END_DB) * (epoch / (NUM_EPOCHS - 1))
+    def epoch_to_snr(x):
+        return SNR_START_DB - (SNR_START_DB - SNR_END_DB) * (x / max(1, NUM_EPOCHS - 1))
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(snrs)
-    plt.title("SNR Curriculum over Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("SNR (dB)")
-    plt.grid(True)
+    def snr_to_epoch(x):
+        return (SNR_START_DB - x) * (NUM_EPOCHS - 1) / (SNR_START_DB - SNR_END_DB)
+
+    secax = ax.secondary_xaxis('top', functions=(epoch_to_snr, snr_to_epoch))
+    secax.set_xlabel('Corresponding SNR (dB)')
+    
+    plt.tight_layout()
+    
+    # Save the figure
+    os.makedirs("output", exist_ok=True)
+    filename = f"output/results_K{K}_M{M}_N{N_SAMPLES}_SNR{SNR_START_DB:.0f}to{SNR_END_DB:.0f}.png"
+    plt.savefig(filename)
+    print(f"Training results figure saved to {filename}")
+    
     plt.show()
 
     # Visualize the learned waveforms (or constellations if N_SAMPLES=1)
