@@ -57,7 +57,7 @@ With simple constellations working, we must now move towards waveforms that can 
 
 ### Step 4: Multipath & Fading (Terrestrial Modeling)
 
-* [ ] **TODO:** Add a Tapped Delay Line model (Rayleigh Fading) to the channel.
+* [x] Add a Tapped Delay Line model (Rayleigh Fading) to the channel.
 * [ ] **Goal:** Discover a waveform that resists "deep fades" common on 2m/70cm bands in urban environments.
 
 ### Step 5: PAPR Optimization for Hardware

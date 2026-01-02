@@ -7,6 +7,7 @@ from tqdm import tqdm # For progress bars
 import os
 import math
 import argparse
+import torch.nn.functional as F
 
 # --- 1. The "End-to-End" Architecture ---
 
@@ -161,6 +162,53 @@ def get_spectral_penalty(waveform_iq, bw_limit=0.5):
     penalty = out_energy / (total_energy + 1e-8)
     return penalty
 
+def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0):
+    """
+    Simulates Rayleigh Fading using a Tapped Delay Line model.
+    n_taps: Number of paths.
+    fading_scale: Strength of the fading (0.0 = no fading, 1.0 = full fading).
+    """
+    if fading_scale <= 0 or n_taps <= 1:
+        return waveform_iq
+    
+    batch_size, channels, n_samples = waveform_iq.size()
+    device = waveform_iq.device
+    
+    # Generate complex Rayleigh coefficients for each tap and each batch
+    # Rayleigh amplitude: sqrt(X^2 + Y^2) where X, Y ~ N(0, 1/sqrt(2))
+    # Equivalent to complex Gaussian H ~ CN(0, 1)
+    # We want the total power across all taps to be 1.0
+    coeffs_real = torch.randn(batch_size, n_taps, device=device) / math.sqrt(2 * n_taps)
+    coeffs_imag = torch.randn(batch_size, n_taps, device=device) / math.sqrt(2 * n_taps)
+    
+    # Mix with fading_scale: (1 - scale)*Direct + scale*Faded
+    # We apply fading per batch (slow fading assumption: constant over message duration)
+    output = waveform_iq * (1.0 - fading_scale)
+    
+    # Tapped delay line
+    faded = torch.zeros_like(waveform_iq)
+    for t in range(n_taps):
+        # Shift the waveform for each tap
+        # We'll use circular shift for simplicity in this discrete model
+        shifted_i = torch.roll(waveform_iq[:, 0, :], shifts=t, dims=1)
+        shifted_q = torch.roll(waveform_iq[:, 1, :], shifts=t, dims=1)
+        
+        # Complex multiply: (I + jQ) * (A + jB) = (IA - QB) + j(IB + QA)
+        a = coeffs_real[:, t].view(-1, 1)
+        b = coeffs_imag[:, t].view(-1, 1)
+        
+        faded[:, 0, :] += (shifted_i * a - shifted_q * b)
+        faded[:, 1, :] += (shifted_i * b + shifted_q * a)
+        
+    output += fading_scale * faded
+    
+    # Power Normalization: Maintain constant average power
+    # Fading can cause deep nulls or peaks; we normalize to keep SNR definition consistent
+    energy = torch.mean(output**2, dim=(1, 2), keepdim=True)
+    output = output / (torch.sqrt(energy) + 1e-8)
+    
+    return output
+
 # --- Training Loop ---
 def train_autoencoder(args):
     M = 2**args.K
@@ -194,7 +242,8 @@ def train_autoencoder(args):
         encoded_signal = encoder(one_hot_messages)
         
         # Channel
-        distorted_signal = apply_phase_noise(encoded_signal, max_phase_deg=args.max_phase_deg)
+        distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
+        distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
         distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
         noisy_signal = add_awgn(distorted_signal, current_snr_db)
         
@@ -353,8 +402,10 @@ if __name__ == "__main__":
     parser.add_argument('--snr-end', type=float, default=-20.0, help='End SNR in dB')
     parser.add_argument('--max-phase-deg', type=float, default=5.0, help='Max phase ambiguity in degrees (default: 5.0 for stable clock)')
     parser.add_argument('--max-freq-step', type=float, default=0.05, help='Max frequency drift step (default: 0.05 for TCXO-like drift)')
-    parser.add_argument('--bw-penalty', type=float, default=0.0, help='Weight of the spectral penalty (default: 0.0)')
+    parser.add_argument('--bw-penalty', type=float, default=0.5, help='Weight of the spectral penalty (default: 0.0)')
     parser.add_argument('--bw-limit', type=float, default=0.5, help='Allowed bandwidth fraction (0.0-1.0, default: 0.5)')
+    parser.add_argument('--n-taps', type=int, default=3, help='Number of multipath taps (default: 3)')
+    parser.add_argument('--fading-scale', type=float, default=0.5, help='Strength of fading effect (0.0-1.0, default: 0.5)')
     args = parser.parse_args()
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -419,7 +470,8 @@ if __name__ == "__main__":
             one_hot_messages = torch.eye(M).to(DEVICE)[messages_indices]
 
             encoded_signal = encoder_model(one_hot_messages)
-            distorted_signal = apply_phase_noise(encoded_signal, max_phase_deg=args.max_phase_deg)
+            distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
+            distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
             distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
             noisy_signal = add_awgn(distorted_signal, test_snr_db)
             decoded_logits = decoder_model(noisy_signal)

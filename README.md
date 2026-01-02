@@ -94,3 +94,19 @@ The constellation is not perfectly align on I/Q axis as it obviously does not ma
 
 ![BER Results K4](output/results_K4_M16_N1_SNR10to0.png)
 ![Waveforms K4](output/waveforms_K4_M16_N1.png)
+
+### 2. Redicosvering pulse-position modulation
+
+The second phase focuses on discovering pulse-position modulation (PPM) waveforms that can resist multipath fading. Thus Rice fading is used to simulate multipath fading.
+
+Also, to ensure the respect of a given bandwidth, a special penalty has been added based on used bandwidth.
+
+The results show that the system is able to rediscover pulse-position modulation.
+
+```bash
+uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --bw-penalty 2.0
+```
+
+![BER Results K4](output/results_K4_M16_N64_SNR10to-20.png)
+![Waveforms K4](output/waveforms_K4_M16_N64.png)
+![Spectrum K4](output/spectrum_K4_N64_BW0.5.png)
