@@ -24,6 +24,21 @@ The system implements an end-to-end differentiable DSP pipeline:
 *   **uv** (Package management and CUDA environment handling)
 *   **NumPy, Matplotlib** (Analysis and visualization)
 
+## Usage
+
+You can run the simulation using `uv`:
+
+```bash
+uv run python main.py -K 4 -N 16 --snr-end -20
+```
+
+### Main Parameters:
+- `-K`: Spreading Factor / Bits per message (default: 4)
+- `-N`: Number of complex I/Q samples per message (default: 16)
+- `--snr-start`: Training start SNR in dB (default: 10)
+- `--snr-end`: Training target SNR in dB (default: -20)
+- `--epochs`: Number of training iterations (default: 2000)
+
 ---
 
 ## Experiments
