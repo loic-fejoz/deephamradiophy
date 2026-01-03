@@ -92,13 +92,21 @@ With simple constellations working, we must now move towards waveforms that can 
 *   [x] **Result:** Linear convolution fading model implemented.
 
 ### Step 11: Advanced Timing Synchronization
-*   **TODO:** Implement correlation-based pre-processors or **Spatial Transformer Networks (STN)**.
-*   **Goal:** Achieve high-accuracy timing alignment for large `max_offset` values (e.g., > 100 samples).
+*   [x] Implement **Spatial Transformer Networks (STN)** for differentiable coarse alignment.
+*   [x] Replace Max-Pooling with **Soft-Attention** for noise rejection in long windows.
+*   [x] **Goal:** Achieve high-accuracy timing alignment for large `max_offset` values.
+*   [x] **Result:** Successfully trained with 64-sample offsets (N=128); STN achieved "lock" at extremely low SNR.
 
 ### Step 12: Pulse Shaping & Nyquist Filtering
-*   **TODO:** Replace simple I/Q pulses with **Root-Raised Cosine (RRC)** filtering or a learned differentiable filter.
-*   **Goal:** Minimize Out-of-Band (OOB) emissions while maintaining Inter-Symbol Interference (ISI) control.
-*   **Metric:** Adjacent Channel Power Ratio (ACPR).
+*   [x] Integrate differentiable **Root-Raised Cosine (RRC)** filtering into the Encoder.
+*   [x] Implement **Matched Filtering** in the Decoder.
+*   [x] **Goal:** Minimize Out-of-Band (OOB) emissions and Inter-Symbol Interference (ISI).
+*   [x] **Result:** Phase 12 complete; spectral efficiency significantly improved.
+
+### Step 13: Real-World Test Framework (Future)
+*   **TODO:** Export learned waveforms to I/Q files for testing with SDR (PlutoSDR/HackRF/RTLSDR).
+*   **Goal:** Verify "AI Modulation" in actual over-the-air experiments.
+*   **Metric:** Adjacent Channel Power Ratio (ACPR) in real RF.
 
 ## 6. Target Metrics (Ongoing)
 

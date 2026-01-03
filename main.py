@@ -9,38 +9,160 @@ import math
 import argparse
 import torch.nn.functional as F
 
-# --- 1. The "End-to-End" Architecture ---
+def get_rrc_pulse(n_samples, rolloff, samples_per_symbol, filter_span):
+    """
+    Generates a Root-Raised Cosine (RRC) impulse response.
+    """
+    T = samples_per_symbol
+    t = torch.arange(-filter_span * T / 2, filter_span * T / 2 + 1) / T
+    
+    pulse = torch.zeros_like(t)
+    
+    # Handle the t=0 case
+    pulse[t == 0] = 1.0 - rolloff + 4 * rolloff / np.pi
+    
+    # Handle the t = +/- T / (4 * alpha) cases
+    if rolloff > 0:
+        special_t = 1.0 / (4 * rolloff)
+        pulse[torch.abs(t - special_t) < 1e-6] = (rolloff / np.sqrt(2)) * (
+            (1 + 2 / np.pi) * np.sin(np.pi / (4 * rolloff)) + (1 - 2 / np.pi) * np.cos(np.pi / (4 * rolloff))
+        )
+        pulse[torch.abs(t + special_t) < 1e-6] = pulse[torch.abs(t - special_t) < 1e-6]
+    
+    # General case
+    mask = (t != 0)
+    if rolloff > 0:
+        mask &= (torch.abs(torch.abs(t) - 1.0 / (4 * rolloff)) > 1e-6)
+    
+    tm = t[mask]
+    pulse[mask] = (
+        torch.sin(np.pi * tm * (1 - rolloff)) + 4 * rolloff * tm * torch.cos(np.pi * tm * (1 + rolloff))
+    ) / (np.pi * tm * (1 - (4 * rolloff * tm)**2))
+    
+    # Normalize energy to 1
+    pulse = pulse / torch.sqrt(torch.sum(pulse**2))
+    return pulse
 
-# Encoder (Transmitter)
+# --- 1. Secondary Modules for Advanced Sync (Phase 11) ---
+
+class STN1D(nn.Module):
+    def __init__(self, input_channels, L, target_N):
+        super(STN1D, self).__init__()
+        self.target_N = target_N
+        self.L = L
+        
+        # Localization network to estimate timing offset
+        # Larger kernels help 'see' the signal even when misaligned
+        self.localization = nn.Sequential(
+            nn.Conv1d(input_channels, 32, kernel_size=15, padding=7),
+            nn.GroupNorm(8, 32),
+            nn.LeakyReLU(0.2),
+            nn.Conv1d(32, 64, kernel_size=15, padding=7),
+            nn.GroupNorm(16, 64),
+            nn.LeakyReLU(0.2),
+            nn.AdaptiveAvgPool1d(16),
+            nn.Flatten(),
+        )
+        
+        # Determine localization output size
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, input_channels, L)
+            loc_out = self.localization(dummy_input)
+            n_flatten = loc_out.size(1)
+            
+        self.fc_loc = nn.Sequential(
+            nn.Linear(n_flatten, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+        
+        # Initialize the weights/bias to output 0 (centered)
+        self.fc_loc[-1].weight.data.zero_()
+        self.fc_loc[-1].bias.data.zero_()
+
+    def forward(self, x):
+        # x: (Batch, 2, L)
+        batch_size = x.size(0)
+        
+        # Predict normalized offset theta in [-1, 1]
+        features = self.localization(x)
+        theta = torch.tanh(self.fc_loc(features)) # (Batch, 1)
+        
+        # Create 1D sampling grid
+        # We want to crop a window of target_N from the search window L
+        scale = self.target_N / self.L
+        
+        # Base grid for target_N samples in [-1, 1]
+        grid = torch.linspace(-1, 1, self.target_N, device=x.device).view(1, 1, self.target_N, 1).expand(batch_size, -1, -1, -1)
+        
+        # Map back to L-window coordinates: grid_mapped = grid * scale + theta_scaled
+        # Since grid_sample expects input in [-1, 1], we effectively zoom and shift
+        # theta_scaled range restricted to [-(1-scale), (1-scale)] to keep window inside [-1, 1]
+        theta_scaled = theta * (1.0 - scale)
+        grid = grid * scale + theta_scaled.view(-1, 1, 1, 1)
+        
+        # Sampling grid for F.grid_sample (Batch, H_out, W_out, 2)
+        sampling_grid = torch.empty(batch_size, 1, self.target_N, 2, device=x.device)
+        sampling_grid[:, :, :, 0] = grid.squeeze(-1) # X-coordinates
+        sampling_grid[:, :, :, 1] = 0.0               # Y-coordinates (unused in 1D)
+        
+        # x_4d: (Batch, Channels, H=1, W=L)
+        x_4d = x.unsqueeze(2)
+        aligned = F.grid_sample(x_4d, sampling_grid, mode='bilinear', padding_mode='zeros', align_corners=True)
+        
+        return aligned.squeeze(2) # (Batch, 2, target_N)
+
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_dim):
+        super(AttentionPooling, self).__init__()
+        self.query = nn.Linear(hidden_dim, 1)
+        
+    def forward(self, x):
+        # x: (Batch, L, hidden_dim)
+        # Compute soft attention weights over the sequence
+        # attn_weights: (Batch, L, 1)
+        attn_weights = F.softmax(self.query(x), dim=1)
+        
+        # Context vector via weighted sum
+        context = torch.sum(x * attn_weights, dim=1)
+        return context
+
+# --- 2. The "End-to-End" Architecture ---
 
 # Encoder (Transmitter)
 class Encoder(nn.Module):
-    def __init__(self, M, N_SAMPLES):
+    def __init__(self, M, N_SAMPLES, args):
         super(Encoder, self).__init__()
         self.M = M
         self.N_SAMPLES = N_SAMPLES 
+        self.args = args
         
         # Use nn.Embedding to map message index to a latent vector
         self.latent_dim = 16
         self.embedding = nn.Embedding(M, self.latent_dim)
         
         self.upsample = nn.Sequential(
-            nn.ConvTranspose1d(self.latent_dim, 32, kernel_size=N_SAMPLES), # (Batch, 32, N)
+            nn.ConvTranspose1d(self.latent_dim, 32, kernel_size=N_SAMPLES),
             nn.ReLU(),
-            nn.Conv1d(32, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(16, 2, kernel_size=3, padding=1), # Output I and Q
+            nn.Conv1d(32, 2, kernel_size=3, padding=1),
         )
 
     def forward(self, messages_indices):
-        # messages_indices is (batch,) 
         x = self.embedding(messages_indices) # (batch, latent_dim)
-        
-        # Reshape for ConvTranspose1d
         x = x.unsqueeze(-1) # (batch, latent_dim, 1)
         
         waveform_iq = self.upsample(x) # (batch, 2, N_SAMPLES)
         
+        # Phase 12: RRC Pulse Shaping
+        if self.args.rolloff > 0:
+            T_s = 4 
+            pulse = get_rrc_pulse(self.N_SAMPLES, self.args.rolloff, T_s, self.args.filter_span).to(waveform_iq.device)
+            pulse = pulse.view(1, 1, -1)
+            
+            i = F.conv1d(waveform_iq[:, 0:1, :], pulse, padding='same')
+            q = F.conv1d(waveform_iq[:, 1:2, :], pulse, padding='same')
+            waveform_iq = torch.cat([i, q], dim=1)
+
         # --- Power Constraint ---
         energy = torch.mean(waveform_iq**2, dim=(1, 2), keepdim=True)
         norm_factor = torch.sqrt(energy)
@@ -54,37 +176,50 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.M = M
         self.N_SAMPLES = N_SAMPLES
-        self.hidden_dim = 128 # Increased capacity
+        self.args = args
+        self.hidden_dim = 64
+        
+        # Phase 12: Matched Filter Front-end
+        if self.args.rolloff > 0:
+            T_s = 4
+            pulse = get_rrc_pulse(self.N_SAMPLES, self.args.rolloff, T_s, self.args.filter_span)
+            self.matched_filter = nn.Parameter(pulse.view(1, 1, -1), requires_grad=False)
+        else:
+            self.matched_filter = None
+
+        # Phase 11: STN Alignment
+        self.stn = STN1D(2, N_SAMPLES + args.max_offset, N_SAMPLES)
 
         self.cnn = nn.Sequential(
-            nn.Conv1d(2, 32, kernel_size=3, padding=1),
+            nn.Conv1d(2, 64, kernel_size=7, padding=3),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.Conv1d(64, 64, kernel_size=7, padding=3),
             nn.ReLU(),
         )
-        
-        # GRU to handle sequence and offsets
-        self.gru = nn.GRU(input_size=64, hidden_size=self.hidden_dim, batch_first=True, bidirectional=True)
-        
-        # Use pooling over time to improve shift invariance
-        self.pool = nn.AdaptiveMaxPool1d(1)
-        
-        # Linear head (bidirectional so hidden_dim * 2)
-        self.fc = nn.Linear(self.hidden_dim * 2, M)
+        # GRU for sequence modeling
+        self.gru = nn.GRU(input_size=64, hidden_size=64, batch_first=True, bidirectional=True)
+        # Attention for selective pooling
+        self.pool = AttentionPooling(64 * 2)
+        self.fc = nn.Linear(64 * 2, M)
 
     def forward(self, x_noisy):
-        # x_noisy is (batch, 2, L) where L = N + max_offset
-        x = self.cnn(x_noisy) # (batch, 64, L)
-        x = x.transpose(1, 2) # (batch, L, 64) for GRU
+        # x_noisy: (Batch, 2, L)
         
-        # Process sequence
-        # out is (batch, L, hidden_dim * 2) 
-        out, _ = self.gru(x) 
+        # Phase 12: Matched Filtering
+        if self.matched_filter is not None:
+            # Move filter to device if needed (parameters do this automatically normally)
+            i = F.conv1d(x_noisy[:, 0:1, :], self.matched_filter, padding='same')
+            q = F.conv1d(x_noisy[:, 1:2, :], self.matched_filter, padding='same')
+            x_noisy = torch.cat([i, q], dim=1)
+
+        # Phase 11: Coarse Alignment (STN)
+        x_aligned = self.stn(x_noisy)
         
-        # Pool across the time dimension L
-        # out.transpose(1, 2) is (batch, hidden_dim * 2, L)
-        features = self.pool(out.transpose(1, 2)).squeeze(-1) # (batch, hidden_dim * 2)
-        
+        # Feature extraction
+        x = self.cnn(x_aligned)
+        x = x.transpose(1, 2)
+        out, _ = self.gru(x)
+        features = self.pool(out)
         logits = self.fc(features)
         return logits
 
@@ -311,8 +446,10 @@ def apply_timing_offset(waveform_iq, max_offset=0):
 # --- Training Loop ---
 def train_autoencoder(args):
     M = 2**args.K
-    encoder = Encoder(M, args.n_samples).to(DEVICE)
+    encoder = Encoder(M, args.n_samples, args).to(DEVICE)
     decoder = Decoder(M, args.n_samples, args).to(DEVICE)
+    
+    criterion = nn.CrossEntropyLoss()
     
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=args.learning_rate)
@@ -358,7 +495,9 @@ def train_autoencoder(args):
         
         bw_penalty = get_spectral_penalty(encoded_signal, bw_limit=args.bw_limit)
         papr_penalty = get_papr_penalty(encoded_signal)
-        loss = ce_loss + args.bw_penalty * bw_penalty + args.papr_penalty * papr_penalty
+        # Calculate total loss with penalty warmup (Phase 11/12 discovery aid)
+        warmup = min(1.0, (epoch + 1) / 1000.0)
+        loss = ce_loss + warmup * (args.bw_penalty * bw_penalty + args.papr_penalty * papr_penalty)
         
         loss.backward()
         optimizer.step()
@@ -434,7 +573,10 @@ def visualize_learned_waveform(encoder, all_messages_indices, args):
     plt.savefig(filename)
     print(f"Waveform figure saved to {filename}")
     
-    plt.show()
+    if not args.no_gui:
+        plt.show()
+    else:
+        plt.close()
 
 def visualize_waterfall(encoder, args):
     """
@@ -486,7 +628,10 @@ def visualize_waterfall(encoder, args):
     filename = f"output/{prefix_str}waterfall_K{args.K}_N{N_SAMPLES}.png"
     plt.savefig(filename)
     print(f"Waterfall figure saved to {filename}")
-    plt.show()
+    if not args.no_gui:
+        plt.show()
+    else:
+        plt.close()
 
 def visualize_spectrum(encoder, all_messages_indices, args):
     """Computes and plots the Power Spectral Density of all learned waveforms."""
@@ -536,7 +681,10 @@ def visualize_spectrum(encoder, all_messages_indices, args):
     filename = f"output/{prefix_str}spectrum_K{args.K}_N{n_samples}_BW{args.bw_limit}.png"
     plt.savefig(filename)
     print(f"Spectrum figure saved to {filename}")
-    plt.show()
+    if not args.no_gui:
+        plt.show()
+    else:
+        plt.close()
 
 # --- Main execution ---
 if __name__ == "__main__":
@@ -560,7 +708,13 @@ if __name__ == "__main__":
     parser.add_argument('--prefix', type=str, default="", help='Prefix for output filenames')
     parser.add_argument('--packet-bytes', type=int, default=20, help='Number of bytes for waterfall visualization (default: 20)')
     parser.add_argument('--max-offset', type=int, default=0, help='Max random timing offset in samples (default: 0)')
+    parser.add_argument('--rolloff', type=float, default=0.0, help='RRC roll-off factor (0.0=off, 0.35 typical, default: 0.0)')
+    parser.add_argument('--filter-span', type=int, default=8, help='RRC filter span in symbols (default: 8)')
+    parser.add_argument('--no-gui', action='store_true', help='Do not display plots, only save them (default: False)')
     args = parser.parse_args()
+
+    if args.no_gui:
+        plt.switch_backend('Agg')
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
@@ -601,7 +755,10 @@ if __name__ == "__main__":
     plt.savefig(filename)
     print(f"Training results figure saved to {filename}")
     
-    plt.show()
+    if not args.no_gui:
+        plt.show()
+    else:
+        plt.close()
 
     # Visualize the learned waveforms (or constellations if N_SAMPLES=1)
     visualize_learned_waveform(encoder_model, all_msg_indices, args)

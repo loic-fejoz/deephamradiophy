@@ -6,6 +6,9 @@ Experimentation with Machine Learning (ML) techniques by developing novel Physic
 
 The goal of this project is to discover non-traditional modulation schemes that move beyond standard FSK, LoRa, or BPSK. By treating the transmitter (Encoder) and receiver (Decoder) as a single differentiable neural network, we aim to "evolve" waveforms optimized for high robustness and sub-noise floor performance (negative SNR) on VHF/UHF bands. It is highly inspired by [RADE Radio Autoencoder](https://freedv.org/radio-autoencoder/).
 
+The objective is for the autoencoder to achieve a BER of 0.1 ($10^{-1}$) at -15dB SNR, which would be considered a competitive protocol I guess.
+Note that this depends also on the number of the number of bits per symbol ($K$, aka message) and the number of samples per symbol ($N$). This is know as the spreading factor in LoRa.
+
 ## Architecture
 
 The system implements an end-to-end differentiable DSP pipeline:
@@ -55,6 +58,7 @@ uv run python main.py -K 4 -N 16 --snr-end -20
 - `--fading-scale`: Strength of fading (0.0-1.0, default: 0.5).
 - `--papr-penalty`: Weight of constant-envelope constraint (default: 1.0).
 - `--max-offset`: Maximum random timing shift in samples (default: 0).
+- `--no-gui`: Do not display plots, only save them to the `output/` directory (default: False).
 - `--max-phase-deg`: Max phase noise in degrees (default: 5.0)
 - `--max-freq-step`: Max frequency drift (default: 0.05)
 
@@ -148,3 +152,24 @@ uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --b
 ![Waveforms K4](output/timing_offset_1_waveforms_K4_M16_N64.png)
 ![Spectrum K4](output/timing_offset_1_spectrum_K4_N64_BW0.5.png)
 ![Waterfall of a 20 bytes packet](output/timing_offset_1_waterfall_K4_N64.png)
+
+### 5. Simple effective modulation
+
+Eventually, the system has rediscovered a simple effective modulation scheme. The internal of the machine learning has been reviewed so as to better suit a timing invariant. I must confess that at this stage, I did not grasp all the changes made due to all the layering modified/added (GRU, STN, etc). The radio part was much easier to get. Note that I also reach some memory limit for the system to run on my Nvidia Geforce GTX 970 with a total capacity of 3.94GiB but of only which 1.32GiB is free.
+
+Yet, if we give to the system some constraints similar to the one of LoRa, ie bigger spreadfactor and large bandwidth, the system is able to rediscover a waveform that is quite effective with a final BER at -15.00dB of 0.158984 under heavy fading and timing offsets.
+
+Note that I cannot reproduce exact same constraints that could lead to LoRa on my machine as it would require $N \in [512..1024] $ and $K \in [7..12]$. Maybe I will try on another machine or if someone want to reproduce?
+
+```bash
+uv run python main.py   -K 2 -N 128   --epochs 3000   --max-offset 64   --fading-scale 0.9 --n-taps 3   --bw-penalty 1.5 --bw-limit 1.0   --papr-penalty 2.0   --rolloff 0.35   --batch-size 128  --snr-start 10 --snr-end -15   --prefix lora_like_discovery_2
+```
+
+![BER Results K2](output/lora_like_discovery_2_results_K2_M4_N128_SNR10to-15.png)
+![Waveforms K2](output/lora_like_discovery_2_waveforms_K2_M4_N128.png)
+![Spectrum K2](output/lora_like_discovery_2_spectrum_K2_N128_BW1.0.png)
+![Waterfall of a 20 bytes packet](output/lora_like_discovery_2_waterfall_K2_N128.png)
+
+I am pretty happy with this simple result as it perform quite well. I observe that there is no chirp but I see some phase changes so I guess this is how the timing synchronization is one. I would like some more experts than me to review the system to confirm this radio aspect but also to better understand the internal of the machine learning.
+
+From a machine learning perspective, I also discover that starting with a too good snr (`--snr-start`) leads to really bad results as it locks the result too early while starting lower like in this case, the model probably prioritize energy per bits or other.
