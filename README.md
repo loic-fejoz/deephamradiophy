@@ -9,6 +9,15 @@ The goal of this project is to discover non-traditional modulation schemes that 
 The objective is for the autoencoder to achieve a BER of 0.1 ($10^{-1}$) at -15dB SNR, which would be considered a competitive protocol I guess.
 Note that this depends also on the number of the number of bits per symbol ($K$, aka message) and the number of samples per symbol ($N$). This is know as the spreading factor in LoRa®.
 
+## Conclusion
+
+I am learning a lot from this project, both from an ML and radio perspective.
+The autoencoder is indeed able to retrieve some of the classical modulation.
+It has not (yet) rediscovered OFDM (but I manly play with PAPR), nor chirp as LoRa® but found some quite effective modulation that are not classical. My computer is now the limiting factor to discover new modulation scheme but some correct candidate has been found. One can look at [my experiments](#experiments) to see the results.
+
+Next steps is probably to request some external reviews as I am no expert nor in radio communication, nor in ML.
+Another potential next step is to generate IQ files from the autoencoder and use them with an SDR to see the performance in real life.
+
 ## Architecture
 
 The system implements an end-to-end differentiable DSP pipeline:
@@ -19,6 +28,8 @@ The system implements an end-to-end differentiable DSP pipeline:
 4.  **Channel:** Differentiable simulation of AWGN, phase noise, and frequency offsets (TBD).
 5.  **Decoder (RX):** Neural network mapping noisy samples back to message probabilities.
 6.  **Loss:** Categorical Cross-Entropy.
+
+[Detailled architecture](#machine-learning-detailed-architecture) is available at the end of this document.
 
 ## Hypotheses and Choices
 
@@ -157,7 +168,7 @@ uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --b
 
 Eventually, the system has rediscovered a simple effective modulation scheme. The internal of the machine learning has been reviewed so as to better suit a timing invariant. I must confess that at this stage, I did not grasp all the changes made due to all the layering modified/added (GRU, STN, etc). The radio part was much easier to get. Note that I also reach some memory limit for the system to run on my Nvidia Geforce GTX 970 with a total capacity of 3.94GiB but of only which 1.32GiB is free.
 
-Yet, if we give to the system some constraints similar to the one of LoRa®, ie bigger spreadfactor and large bandwidth, the system is able to rediscover a waveform that is quite effective with a final BER at -15.00dB of 0.158984 under heavy fading and timing offsets. The PAPR is 0.67 dB.
+Yet, if we give to the system some constraints similar to the one of LoRa®, ie bigger spreadfactor and large bandwidth, the system is able to rediscover a waveform that is quite effective with a **final BER at -15.00dB of 0.16 under heavy fading and timing offsets**. The **PAPR is 0.67 dB**.
 
 Note that I cannot reproduce exact same constraints that could lead to LoRa® on my machine as it would require $N \in [512..1024] $ and $K \in [7..12]$. Maybe I will try on another machine or if someone want to reproduce?
 
@@ -173,6 +184,23 @@ uv run python main.py   -K 2 -N 128   --epochs 3000   --max-offset 64   --fading
 I am pretty happy with this simple result as it perform quite well. I observe that there is no chirp but I see some changes in the phase so I guess this is how the timing synchronization is done. I would like some greater experts (I am a noob) than me to review the system to confirm this radio aspect but also to better understand the internal of the machine learning.
 
 From a machine learning perspective, I also discover that starting with a too good snr (`--snr-start`) leads to really bad results. Indeed it locks the result too early, while starting lower like in this case, the model probably prioritize energy per bits or other.
+
+### 6. No PAPR limit but very-effective modulation
+
+Until now, I was always trying to have a PAPR penalty. However, I discover that OFDM has usually a PAPR in the 8-12dB. The autoencoder is able to discover a waveform that is very effective with a **final BER at -15.00dB of 0.021 under heavy fading and timing offsets**. The **PAPR is 11.60dB**.
+
+I do not really know what to do with this but it is interesting to learn that.
+
+```bash
+uv run python main.py   -K 4 -N 512   --epochs 3000   --max-offset 64   --fading-scale 0.9 --n-taps 3   --bw-penalty 1.5 --bw-limit 1.0   --papr-penalty 0   --rolloff 0.33   --batch-size 256  --snr-start 10 --snr-end -15   --prefix no_par_1 --use-circular
+```
+
+![BER Results K4](output/no_par_1_results_K4_M16_N512_SNR10to-15.png)
+![Waveforms K4](output/no_par_1_waveforms_K4_M16_N512.png)
+![Spectrum K4](output/no_par_1_spectrum_K4_N512_BW1.0.png)
+![Waterfall of a 20 bytes packet](output/no_par_1_waterfall_K4_N512.png)
+
+---
 
 ## Machine Learning Detailed Architecture
 
