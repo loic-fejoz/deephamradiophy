@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# output intermediate files
+output/architecture_decoder
+output/architecture_encoder

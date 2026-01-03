@@ -9,6 +9,13 @@ import math
 import argparse
 import torch.nn.functional as F
 
+try:
+    from torchview import draw_graph
+    import graphviz
+    HAS_TORCHVIEW = True
+except ImportError:
+    HAS_TORCHVIEW = False
+
 def get_rrc_pulse(n_samples, rolloff, samples_per_symbol, filter_span):
     """
     Generates a Root-Raised Cosine (RRC) impulse response.
@@ -101,10 +108,10 @@ class STN1D(nn.Module):
         theta_scaled = theta * (1.0 - scale)
         grid = grid * scale + theta_scaled.view(-1, 1, 1, 1)
         
-        # Sampling grid for F.grid_sample (Batch, H_out, W_out, 2)
-        sampling_grid = torch.empty(batch_size, 1, self.target_N, 2, device=x.device)
-        sampling_grid[:, :, :, 0] = grid.squeeze(-1) # X-coordinates
-        sampling_grid[:, :, :, 1] = 0.0               # Y-coordinates (unused in 1D)
+        # Construct the 4D sampling grid (Batch, H_out, W_out, 2)
+        # Using concat instead of in-place assignment to help torchview visualization
+        zero_grid = torch.zeros_like(grid)
+        sampling_grid = torch.cat([grid, zero_grid], dim=-1) # (Batch, 1, target_N, 2)
         
         # x_4d: (Batch, Channels, H=1, W=L)
         x_4d = x.unsqueeze(2)
@@ -686,6 +693,47 @@ def visualize_spectrum(encoder, all_messages_indices, args):
     else:
         plt.close()
 
+def draw_model_architecture(args):
+    """
+    Uses torchview to generate a visualization of the Encoder and Decoder.
+    """
+    if not HAS_TORCHVIEW:
+        print("Error: torchview and graphviz are required for --draw-graph.")
+        print("Install them with: uv add torchview graphviz")
+        return
+
+    # Mock device for graph generation
+    device = torch.device("cpu")
+    
+    M = 2**args.K
+    encoder = Encoder(M, args.n_samples, args).to(device)
+    decoder = Decoder(M, args.n_samples, args).to(device)
+
+    print("Generating architecture diagrams in 'output/'...")
+    
+    # 1. Visualize Encoder
+    # Encoder takes indices (Batch,)
+    dummy_indices = torch.randint(0, M, (1,)).long().to(device)
+    try:
+        enc_graph = draw_graph(encoder, input_data=dummy_indices, device='cpu', 
+                               graph_name="Encoder", expand_nested=True)
+        enc_graph.visual_graph.render(os.path.join("output", "architecture_encoder"), format="png")
+    except Exception as e:
+        print(f"Error drawing Encoder: {e}")
+    
+    # 2. Visualize Decoder
+    # Decoder input: (Batch, Channels, Time)
+    L = args.n_samples + args.max_offset
+    dummy_signal = torch.zeros(1, 2, L).to(device)
+    try:
+        dec_graph = draw_graph(decoder, input_data=dummy_signal, device='cpu', 
+                               graph_name="Decoder", expand_nested=True)
+        dec_graph.visual_graph.render(os.path.join("output", "architecture_decoder"), format="png")
+    except Exception as e:
+        print(f"Error drawing Decoder: {e}")
+
+    print("Done. Files saved to output/architecture_encoder.png and output/architecture_decoder.png")
+
 # --- Main execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Deep-HAM Radio PHY Autoencoder Training')
@@ -710,6 +758,7 @@ if __name__ == "__main__":
     parser.add_argument('--max-offset', type=int, default=0, help='Max random timing offset in samples (default: 0)')
     parser.add_argument('--rolloff', type=float, default=0.0, help='RRC roll-off factor (0.0=off, 0.35 typical, default: 0.0)')
     parser.add_argument('--filter-span', type=int, default=8, help='RRC filter span in symbols (default: 8)')
+    parser.add_argument('--draw-graph', action='store_true', help='Draw model architecture diagram and exit (default: False)')
     parser.add_argument('--no-gui', action='store_true', help='Do not display plots, only save them (default: False)')
     args = parser.parse_args()
 
@@ -718,6 +767,11 @@ if __name__ == "__main__":
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
+
+    if args.draw_graph:
+        draw_model_architecture(args)
+        import sys
+        sys.exit(0)
 
     encoder_model, decoder_model, losses, bers, snrs, all_msg_indices = train_autoencoder(args)
 
