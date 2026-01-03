@@ -68,7 +68,8 @@ class Decoder(nn.Module):
         )
         
         # Linear head to get logits for M messages
-        self.fc = nn.Linear(16 * N_SAMPLES, M)
+        # We increase the input size to handle the timing offset window
+        self.fc = nn.Linear(16 * (N_SAMPLES + args.max_offset), M)
 
     def forward(self, x_noisy):
         # x_noisy is (batch, 2, N_SAMPLES)
@@ -162,6 +163,33 @@ def get_spectral_penalty(waveform_iq, bw_limit=0.5):
     penalty = out_energy / (total_energy + 1e-8)
     return penalty
 
+def get_papr(waveform_iq):
+    """
+    Computes the Peak-to-Average Power Ratio (PAPR) in dB.
+    PAPR = 10 * log10(max(|x|^2) / mean(|x|^2))
+    """
+    # Instantaneous power: I^2 + Q^2
+    power = torch.sum(waveform_iq**2, dim=1) # (Batch, N_SAMPLES)
+    
+    peak_power, _ = torch.max(power, dim=1)
+    mean_power = torch.mean(power, dim=1)
+    
+    papr = 10 * torch.log10(peak_power / (mean_power + 1e-8) + 1e-8)
+    return torch.mean(papr) # Return average PAPR across batch
+
+def get_papr_penalty(waveform_iq):
+    """
+    Computes a penalty proportional to the variance of the instantaneous power.
+    A constant envelope signal has 0 variance in power.
+    """
+    power = torch.sum(waveform_iq**2, dim=1) # (Batch, N_SAMPLES)
+    
+    # Since we normalize in the Encoder to mean_power = 2.0 (2 channels, mean=1.0)
+    # we want power to be 2.0 everywhere for constant envelope.
+    papr_penalty = torch.mean((power - 2.0)**2)
+    
+    return papr_penalty
+
 def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0):
     """
     Simulates Rayleigh Fading using a Tapped Delay Line model.
@@ -209,6 +237,27 @@ def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0):
     
     return output
 
+def apply_timing_offset(waveform_iq, max_offset=0):
+    """
+    Randomly shifts the signal within a larger window.
+    Pads the signal to length N + max_offset and shifts it by [0, max_offset].
+    """
+    if max_offset <= 0:
+        return waveform_iq
+    
+    batch_size, channels, n_samples = waveform_iq.size()
+    device = waveform_iq.device
+    
+    # We want to return a window of size N + max_offset
+    window_size = n_samples + max_offset
+    output = torch.zeros(batch_size, channels, window_size, device=device)
+    
+    for b in range(batch_size):
+        offset = torch.randint(0, max_offset + 1, (1,)).item()
+        output[b, :, offset:offset + n_samples] = waveform_iq[b]
+        
+    return output
+
 # --- Training Loop ---
 def train_autoencoder(args):
     M = 2**args.K
@@ -245,6 +294,10 @@ def train_autoencoder(args):
         distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
         distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
         distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
+        
+        # Timing Offset (New Phase 7) - Signal now becomes (Batch, 2, N + max_offset)
+        distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
+        
         noisy_signal = add_awgn(distorted_signal, current_snr_db)
         
         # Receiver
@@ -254,7 +307,8 @@ def train_autoencoder(args):
         ce_loss = criterion(decoded_logits, messages_indices)
         
         bw_penalty = get_spectral_penalty(encoded_signal, bw_limit=args.bw_limit)
-        loss = ce_loss + args.bw_penalty * bw_penalty
+        papr_penalty = get_papr_penalty(encoded_signal)
+        loss = ce_loss + args.bw_penalty * bw_penalty + args.papr_penalty * papr_penalty
         
         loss.backward()
         optimizer.step()
@@ -280,7 +334,8 @@ def train_autoencoder(args):
         ber_history.append(ber)
 
         if (epoch + 1) % 50 == 0:
-            print(f"Epoch {epoch+1}/{args.epochs}, SNR: {current_snr_db:.2f} dB, Loss: {loss.item():.4f}, BER: {ber:.4f}")
+            avg_papr = get_papr(encoded_signal)
+            print(f"Epoch {epoch+1}/{args.epochs}, SNR: {current_snr_db:.2f} dB, Loss: {loss.item():.4f}, BER: {ber:.4f}, PAPR: {avg_papr:.2f} dB")
 
     print("Training finished!")
     return encoder, decoder, train_losses, ber_history, snr_history, all_messages_one_hot
@@ -292,7 +347,10 @@ def visualize_learned_waveform(encoder, all_messages_one_hot, args):
     encoder.eval() # Set encoder to evaluation mode
     with torch.no_grad():
         # Get the transmitted signals for all M messages
-        learned_waveforms_iq = encoder(all_messages_one_hot).cpu().numpy()
+        waveform_iq_tensor = encoder(all_messages_one_hot)
+        avg_papr = get_papr(waveform_iq_tensor)
+        print(f"Final average PAPR of learned waveforms: {avg_papr:.2f} dB")
+        learned_waveforms_iq = waveform_iq_tensor.cpu().numpy()
     
     # Plotting for N_SAMPLES > 1 (i.e., not a simple constellation point)
     print("\nVisualizing learned waveforms...")
@@ -335,10 +393,64 @@ def visualize_learned_waveform(encoder, all_messages_one_hot, args):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
     os.makedirs("output", exist_ok=True)
-    filename = f"output/waveforms_K{args.K}_M{M}_N{N_SAMPLES}.png"
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    filename = f"output/{prefix_str}waveforms_K{args.K}_M{M}_N{N_SAMPLES}.png"
     plt.savefig(filename)
     print(f"Waveform figure saved to {filename}")
     
+    plt.show()
+
+def visualize_waterfall(encoder, args):
+    """
+    Simulates a 'on-the-air' waterfall by encoding a random packet.
+    """
+    M = 2**args.K
+    N_SAMPLES = args.n_samples
+    num_symbols = (args.packet_bytes * 8) // args.K
+    
+    print(f"\nVisualizing waterfall for a {args.packet_bytes}-byte packet ({num_symbols} symbols)...")
+    
+    # Generate random symbols
+    indices = torch.randint(0, M, (num_symbols,)).to(DEVICE)
+    one_hot = torch.eye(M).to(DEVICE)[indices]
+    
+    encoder.eval()
+    with torch.no_grad():
+        # Encode (num_symbols, 2, N_SAMPLES)
+        waveforms = encoder(one_hot)
+        
+        # Reshape to a single continuous stream (2, num_symbols * N_SAMPLES)
+        stream = waveforms.transpose(0, 1).reshape(2, -1).unsqueeze(0) # (1, 2, L)
+        
+        # We show the CLEAN signal as requested (no channel impairments)
+        signal = stream.squeeze(0).cpu().numpy()
+        complex_signal = signal[0] + 1j * signal[1]
+    
+    plt.figure(figsize=(12, 8))
+    # Waterfall plot (Spectrogram)
+    n_fft = max(16, 2**int(np.ceil(np.log2(N_SAMPLES * 2))))
+    
+    plt.subplot(2, 1, 1)
+    plt.specgram(complex_signal, NFFT=n_fft, Fs=1.0, noverlap=n_fft//2, cmap='viridis')
+    plt.title(f"Waterfall (Spectrogram) of Clean {args.packet_bytes}-byte Packet (TX Signal)")
+    plt.ylabel("Normalized Frequency")
+    plt.xlabel("Sample Index")
+    plt.colorbar(label='Intensity (dB)')
+    
+    plt.subplot(2, 1, 2)
+    plt.plot(np.real(complex_signal[:1000]), label='I (first 1000 samples)')
+    plt.plot(np.imag(complex_signal[:1000]), label='Q', alpha=0.5)
+    plt.title("Time-domain signal (fragment)")
+    plt.xlabel("Sample Index")
+    plt.legend()
+    plt.grid(True)
+    
+    plt.tight_layout()
+    os.makedirs("output", exist_ok=True)
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    filename = f"output/{prefix_str}waterfall_K{args.K}_N{N_SAMPLES}.png"
+    plt.savefig(filename)
+    print(f"Waterfall figure saved to {filename}")
     plt.show()
 
 def visualize_spectrum(encoder, all_messages_one_hot, args):
@@ -385,7 +497,8 @@ def visualize_spectrum(encoder, all_messages_one_hot, args):
     plt.legend()
     
     os.makedirs("output", exist_ok=True)
-    filename = f"output/spectrum_K{args.K}_N{n_samples}_BW{args.bw_limit}.png"
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    filename = f"output/{prefix_str}spectrum_K{args.K}_N{n_samples}_BW{args.bw_limit}.png"
     plt.savefig(filename)
     print(f"Spectrum figure saved to {filename}")
     plt.show()
@@ -406,6 +519,10 @@ if __name__ == "__main__":
     parser.add_argument('--bw-limit', type=float, default=0.5, help='Allowed bandwidth fraction (0.0-1.0, default: 0.5)')
     parser.add_argument('--n-taps', type=int, default=3, help='Number of multipath taps (default: 3)')
     parser.add_argument('--fading-scale', type=float, default=0.5, help='Strength of fading effect (0.0-1.0, default: 0.5)')
+    parser.add_argument('--papr-penalty', type=float, default=1.0, help='Weight of the PAPR constraint (default: 1.0)')
+    parser.add_argument('--prefix', type=str, default="", help='Prefix for output filenames')
+    parser.add_argument('--packet-bytes', type=int, default=20, help='Number of bytes for waterfall visualization (default: 20)')
+    parser.add_argument('--max-offset', type=int, default=0, help='Max random timing offset in samples (default: 0)')
     args = parser.parse_args()
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -442,7 +559,8 @@ if __name__ == "__main__":
     
     # Save the figure
     os.makedirs("output", exist_ok=True)
-    filename = f"output/results_K{args.K}_M{M}_N{args.n_samples}_SNR{args.snr_start:.0f}to{args.snr_end:.0f}.png"
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    filename = f"output/{prefix_str}results_K{args.K}_M{M}_N{args.n_samples}_SNR{args.snr_start:.0f}to{args.snr_end:.0f}.png"
     plt.savefig(filename)
     print(f"Training results figure saved to {filename}")
     
@@ -453,6 +571,9 @@ if __name__ == "__main__":
     
     # Visualize the spectrum
     visualize_spectrum(encoder_model, all_msg_one_hot, args)
+
+    # Visualize the waterfall
+    visualize_waterfall(encoder_model, args)
 
     # Example of how to evaluate BER at a specific SNR after training
     print("\nEvaluating BER at target SNR_END_DB:")
@@ -473,6 +594,7 @@ if __name__ == "__main__":
             distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
             distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
             distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
+            distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
             noisy_signal = add_awgn(distorted_signal, test_snr_db)
             decoded_logits = decoder_model(noisy_signal)
 

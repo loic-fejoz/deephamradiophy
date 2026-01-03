@@ -27,6 +27,7 @@ To ground the autoencoder in real-world Ham Radio physics, we make the following
 | **Freq Offset** | $0.05$ | Simulates a $\pm 1$ ppm TCXO drift (approx. $150$ Hz error at $144$ MHz/VHF) under a $12$ kHz sampling assumption. |
 | **Latency ($N$)** | $16$ | Spreading factor for $K=4$. We assume a low-speed robust payload where bandwidth can be traded for sensitivity. |
 | **SNR range** | $+10 \to -20$ dB | The goal is to discover modulations that remain decodable even when the signal is deep in the noise floor. |
+- **PAPR (Peak-to-Average Power Ratio)**: Most Ham Radio power amplifiers are non-linear (Class-C). We optimize for low PAPR so the AI discovers signals that don't "splatter" when amplified.
 
 ## Technical Stack
 
@@ -51,6 +52,9 @@ uv run python main.py -K 4 -N 16 --snr-end -20
 - `--epochs`: Number of training iterations (default: 2000)
 - `--bw-penalty`: Weight of the spectral penalty (default: 0.0)
 - `--bw-limit`: Fraction of total bandwidth allowed (0.0-1.0, default: 0.5)
+- `--fading-scale`: Strength of fading (0.0-1.0, default: 0.5).
+- `--papr-penalty`: Weight of constant-envelope constraint (default: 1.0).
+- `--max-offset`: Maximum random timing shift in samples (default: 0).
 - `--max-phase-deg`: Max phase noise in degrees (default: 5.0)
 - `--max-freq-step`: Max frequency drift (default: 0.05)
 
@@ -100,6 +104,8 @@ The constellation is not perfectly align on I/Q axis as it obviously does not ma
 The second phase focuses on discovering pulse-position modulation (PPM) waveforms that can resist multipath fading. Thus Rice fading is used to simulate multipath fading.
 
 Also, to ensure the respect of a given bandwidth, a special penalty has been added based on used bandwidth.
+- **Spectral Penalty**: FFT-based energy leakage detection for regulatory compliance.
+- **PAPR Optimization**: Penalty for high Peak-to-Average Power Ratio to enable use of efficient non-linear Class-C amplifiers.
 
 The results show that the system is able to rediscover pulse-position modulation.
 
@@ -110,3 +116,20 @@ uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --b
 ![BER Results K4](output/results_K4_M16_N64_SNR10to-20.png)
 ![Waveforms K4](output/waveforms_K4_M16_N64.png)
 ![Spectrum K4](output/spectrum_K4_N64_BW0.5.png)
+
+
+### 3. Adding Peak-to-Average Power Ratio (PAPR) penalty
+
+As we do not want to cheat on available power, a PAPR penalty has been added.
+The PAPR has forced the system to spread-out the system over time.
+Also the fading penalty has forced the system to come up with several pulse.
+With that, I learned a new modulation scheme that I did not know before (but seems to be well-known by the number of journals' articles): Multi-Pulse Position Modulation (MPPM)!
+
+```bash
+uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --bw-penalty 2.0 --papr-penalty 1.0
+```
+
+![BER Results K4](output/results_K4_M16_N64_PAPR1.0_SNR10to-20.png)
+![Waveforms K4](output/waveforms_K4_M16_N64_PAPR1.0.png)
+![Spectrum K4](output/spectrum_K4_N64_BW0.5_PAPR1.0.png)
+![Waterfall of a 20 bytes packet](output/waterfall1_waterfall_K4_N64.png)

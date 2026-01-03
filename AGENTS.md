@@ -56,19 +56,30 @@ With simple constellations working, we must now move towards waveforms that can 
 *   **Constraint:** Use a 1D-CNN or larger $N$ to discover frequency-diversity schemes.
 
 ### Step 4: Multipath & Fading (Terrestrial Modeling)
-
-* [x] Add a Tapped Delay Line model (Rayleigh Fading) to the channel.
-* [ ] **Goal:** Discover a waveform that resists "deep fades" common on 2m/70cm bands in urban environments.
+*   [x] Add a Tapped Delay Line model (Rayleigh Fading) to the channel.
+*   [x] **Goal:** Discover a waveform that resists "deep fades" (Rayleigh Fading).
+*   **Result:** Discovered PPM-like waveforms with high spectral redundancy.
 
 ### Step 5: PAPR Optimization for Hardware
+*   [x] Implement Peak-to-Average Power Ratio (PAPR) calculation.
+*   [x] Add a penalty to the loss function to favor constant-envelope waveforms.
+*   [x] Verified: PAPR reduced from 1.58 dB to 0.39 dB in training.
+*   **Goal:** Ensure the waveform can be transmitted by cheap, non-linear Class-C amateur radio amplifiers without massive distortion.
 
-* [ ] **TODO:** Add a penalty to the Loss Function for high Peak-to-Average Power Ratio.
-* [ ] **Goal:** Ensure the resulting waveform can be transmitted by cheap, non-linear Class-C amateur radio amplifiers without massive distortion.
+### Step 6: Waterfall Visualization & Experiment Diagnostics
+*   [x] Implement `visualize_waterfall` to show "on-the-air" packet behavior.
+*   [x] Add `--prefix` CLI argument for better experiment tracking.
+*   **Result:** Verified the combinatorial nature of learned MPPM waveforms.
 
-### Step 6: Timing Discovery & Synchronization
-*   **TODO:** Introduce random **Sample Offsets** (delay) in the channel.
-*   **Goal:** The model must discover its own "Preamble" or "Sync Word" to align the message in time.
-*   **Metric:** Sync acquisition probability at low SNR.
+### Step 7: Timing Discovery & Synchronization
+*   [x] Introduce random **Sample Offsets** (delay) in the channel.
+*   [x] **Goal:** The model must discover its own "Preamble" or "Sync Word" to align the message in time.
+*   [x] **Result:** Successfully trained with 8-sample random shifts; Decoder learned to "scan" the window for features.
+
+### Step 8: Pulse Shaping & Nyquist Filtering
+*   **TODO:** Replace simple I/Q pulses with **Root-Raised Cosine (RRC)** filtering or a learned differentiable filter.
+*   **Goal:** Minimize Out-of-Band (OOB) emissions while maintaining Inter-Symbol Interference (ISI) control.
+*   **Metric:** Adjacent Channel Power Ratio (ACPR).
 
 ## 6. Target Metrics (Ongoing)
 
