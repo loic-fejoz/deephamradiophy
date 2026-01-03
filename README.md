@@ -133,3 +133,18 @@ uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --b
 ![Waveforms K4](output/waveforms_K4_M16_N64_PAPR1.0.png)
 ![Spectrum K4](output/spectrum_K4_N64_BW0.5_PAPR1.0.png)
 ![Waterfall of a 20 bytes packet](output/waterfall1_waterfall_K4_N64.png)
+
+### 4. Adding timing offset
+
+The receiver may not be synchronized with the transmitter, thus a random timing offset has been added. The internal of the machine learning has been reviewed so as to better suit a timing invariant.
+
+The final PAPR is 0.08 dB, meaning the power envelope is pretty constant (which is a good thing). The waveform is much more creative, yet the BER is still not acceptable. Probably the spreading factor, ie $N/K$ is too small.
+
+```bash
+uv run python main.py -K 4 -N 64 --fading-scale 0.9 --n-taps 5 --epochs 3000 --bw-penalty 2.0 --papr-penalty 1.0 --max-offset 64 --prefix timing_offset_1
+```
+
+![BER Results K4](output/timing_offset_1_results_K4_M16_N64_SNR10to-20.png)
+![Waveforms K4](output/timing_offset_1_waveforms_K4_M16_N64.png)
+![Spectrum K4](output/timing_offset_1_spectrum_K4_N64_BW0.5.png)
+![Waterfall of a 20 bytes packet](output/timing_offset_1_waterfall_K4_N64.png)

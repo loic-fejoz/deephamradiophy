@@ -76,7 +76,26 @@ With simple constellations working, we must now move towards waveforms that can 
 *   [x] **Goal:** The model must discover its own "Preamble" or "Sync Word" to align the message in time.
 *   [x] **Result:** Successfully trained with 8-sample random shifts; Decoder learned to "scan" the window for features.
 
-### Step 8: Pulse Shaping & Nyquist Filtering
+### Step 8: High-Expressive Encoder & Sequence Decoder
+*   [x] Replace simple linear interpolation with **Transposed Convolutions** (`ConvTranspose1d`) and **Embeddings**.
+*   [x] **Goal:** Allow the network to learn its own upsampling/shaping filters. Investigate sequence-aware models (GRU).
+*   [x] **Result:** Improved convergence significantly; Bi-GRU handles timing offsets natively.
+
+### Step 9: Precision Metrics & Gray Coding
+*   [x] Implement actual bitwise comparison for BER calculation instead of approximations.
+*   [x] **Goal:** Enable discovery of **Gray Coding** where similar waveforms map to messages with low Hamming distance.
+*   [x] **Result:** Bitwise BER integrated and used for gradient tracking.
+
+### Step 10: Real-time Dynamics & Channel Toggles
+*   [x] Add symbol-to-symbol phase jitter and time-varying frequency drift (in progress/partial).
+*   [x] **Goal:** Increase robustness for longer packets. Add a toggle for **Linear vs. Circular** multipath convolution.
+*   [x] **Result:** Linear convolution fading model implemented.
+
+### Step 11: Advanced Timing Synchronization
+*   **TODO:** Implement correlation-based pre-processors or **Spatial Transformer Networks (STN)**.
+*   **Goal:** Achieve high-accuracy timing alignment for large `max_offset` values (e.g., > 100 samples).
+
+### Step 12: Pulse Shaping & Nyquist Filtering
 *   **TODO:** Replace simple I/Q pulses with **Root-Raised Cosine (RRC)** filtering or a learned differentiable filter.
 *   **Goal:** Minimize Out-of-Band (OOB) emissions while maintaining Inter-Symbol Interference (ISI) control.
 *   **Metric:** Adjacent Channel Power Ratio (ACPR).

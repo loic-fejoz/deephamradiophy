@@ -19,33 +19,29 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.M = M
         self.N_SAMPLES = N_SAMPLES 
-
-        # We start with a linear layer to map one-hot bits to a latent space
-        # then we reshape to (Batch, Channels, Length) for 1D convolutions.
-        # We compute the latent dimension from M and N_SAMPLES to ensure 
-        # enough expressive power regardless of spreading factor.
-        self.latent_dim = max(M, N_SAMPLES)
-        self.fc = nn.Linear(M, self.latent_dim)
         
-        # 1D CNN to shape the waveform
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=3, padding=1),
+        # Use nn.Embedding to map message index to a latent vector
+        self.latent_dim = 16
+        self.embedding = nn.Embedding(M, self.latent_dim)
+        
+        self.upsample = nn.Sequential(
+            nn.ConvTranspose1d(self.latent_dim, 32, kernel_size=N_SAMPLES), # (Batch, 32, N)
             nn.ReLU(),
-            nn.Conv1d(16, 2, kernel_size=3, padding=1), # Output 2 channels for I and Q
+            nn.Conv1d(32, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(16, 2, kernel_size=3, padding=1), # Output I and Q
         )
 
-    def forward(self, x):
-        # x is (batch, M)
-        x = self.fc(x)
+    def forward(self, messages_indices):
+        # messages_indices is (batch,) 
+        x = self.embedding(messages_indices) # (batch, latent_dim)
         
-        # Reshape to (batch, 1, latent_len)
-        x = x.view(-1, 1, self.latent_dim)
-        x = torch.nn.functional.interpolate(x, size=self.N_SAMPLES, mode='linear', align_corners=False)
+        # Reshape for ConvTranspose1d
+        x = x.unsqueeze(-1) # (batch, latent_dim, 1)
         
-        waveform_iq = self.net(x) # (batch, 2, N_SAMPLES)
+        waveform_iq = self.upsample(x) # (batch, 2, N_SAMPLES)
         
         # --- Power Constraint ---
-        # Average energy over the 2 channels and N samples
         energy = torch.mean(waveform_iq**2, dim=(1, 2), keepdim=True)
         norm_factor = torch.sqrt(energy)
         waveform_iq = waveform_iq / (norm_factor + 1e-8)
@@ -54,26 +50,41 @@ class Encoder(nn.Module):
 
 # Decoder (Receiver)
 class Decoder(nn.Module):
-    def __init__(self, M, N_SAMPLES):
+    def __init__(self, M, N_SAMPLES, args):
         super(Decoder, self).__init__()
         self.M = M
         self.N_SAMPLES = N_SAMPLES
+        self.hidden_dim = 128 # Increased capacity
 
-        self.net = nn.Sequential(
+        self.cnn = nn.Sequential(
             nn.Conv1d(2, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(32, 16, kernel_size=3, padding=1),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Flatten(),
         )
         
-        # Linear head to get logits for M messages
-        # We increase the input size to handle the timing offset window
-        self.fc = nn.Linear(16 * (N_SAMPLES + args.max_offset), M)
+        # GRU to handle sequence and offsets
+        self.gru = nn.GRU(input_size=64, hidden_size=self.hidden_dim, batch_first=True, bidirectional=True)
+        
+        # Use pooling over time to improve shift invariance
+        self.pool = nn.AdaptiveMaxPool1d(1)
+        
+        # Linear head (bidirectional so hidden_dim * 2)
+        self.fc = nn.Linear(self.hidden_dim * 2, M)
 
     def forward(self, x_noisy):
-        # x_noisy is (batch, 2, N_SAMPLES)
-        features = self.net(x_noisy)
+        # x_noisy is (batch, 2, L) where L = N + max_offset
+        x = self.cnn(x_noisy) # (batch, 64, L)
+        x = x.transpose(1, 2) # (batch, L, 64) for GRU
+        
+        # Process sequence
+        # out is (batch, L, hidden_dim * 2) 
+        out, _ = self.gru(x) 
+        
+        # Pool across the time dimension L
+        # out.transpose(1, 2) is (batch, hidden_dim * 2, L)
+        features = self.pool(out.transpose(1, 2)).squeeze(-1) # (batch, hidden_dim * 2)
+        
         logits = self.fc(features)
         return logits
 
@@ -126,6 +137,34 @@ def add_awgn(waveform_iq, snr_db):
     
     noise = torch.randn_like(waveform_iq) * noise_std
     return waveform_iq + noise
+
+def indices_to_bits(indices, K):
+    """
+    Converts message indices (0 to 2^K-1) to bit tensors.
+    """
+    batch_size = indices.size(0)
+    bits = []
+    for i in range(K):
+        # Extract i-th bit
+        # 2^i bit is (indices >> i) & 1
+        bits.append((indices >> i) & 1)
+    
+    # Returns (batch, K)
+    return torch.stack(bits, dim=1).float()
+
+def calculate_bitwise_ber(predicted_logits, true_indices, K):
+    """
+    Calculates actual Bit Error Rate by comparing binary representations.
+    """
+    _, predicted_indices = torch.max(predicted_logits, 1)
+    
+    pred_bits = indices_to_bits(predicted_indices, K)
+    true_bits = indices_to_bits(true_indices, K)
+    
+    # Hamming distance
+    bit_errors = (pred_bits != true_bits).sum().item()
+    total_bits = true_indices.size(0) * K
+    return bit_errors / total_bits, bit_errors
 
 def get_spectral_penalty(waveform_iq, bw_limit=0.5):
     """
@@ -190,11 +229,13 @@ def get_papr_penalty(waveform_iq):
     
     return papr_penalty
 
-def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0):
+def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0, use_circular=True):
     """
     Simulates Rayleigh Fading using a Tapped Delay Line model.
     n_taps: Number of paths.
     fading_scale: Strength of the fading (0.0 = no fading, 1.0 = full fading).
+    use_circular: If True, uses circular convolution (assumes cyclic prefix/OFDM).
+                 If False, uses linear convolution (standard temporal fading).
     """
     if fading_scale <= 0 or n_taps <= 1:
         return waveform_iq
@@ -202,36 +243,45 @@ def apply_multipath_fading(waveform_iq, n_taps=3, fading_scale=0.0):
     batch_size, channels, n_samples = waveform_iq.size()
     device = waveform_iq.device
     
-    # Generate complex Rayleigh coefficients for each tap and each batch
-    # Rayleigh amplitude: sqrt(X^2 + Y^2) where X, Y ~ N(0, 1/sqrt(2))
-    # Equivalent to complex Gaussian H ~ CN(0, 1)
-    # We want the total power across all taps to be 1.0
     coeffs_real = torch.randn(batch_size, n_taps, device=device) / math.sqrt(2 * n_taps)
     coeffs_imag = torch.randn(batch_size, n_taps, device=device) / math.sqrt(2 * n_taps)
     
-    # Mix with fading_scale: (1 - scale)*Direct + scale*Faded
-    # We apply fading per batch (slow fading assumption: constant over message duration)
     output = waveform_iq * (1.0 - fading_scale)
-    
-    # Tapped delay line
     faded = torch.zeros_like(waveform_iq)
-    for t in range(n_taps):
-        # Shift the waveform for each tap
-        # We'll use circular shift for simplicity in this discrete model
-        shifted_i = torch.roll(waveform_iq[:, 0, :], shifts=t, dims=1)
-        shifted_q = torch.roll(waveform_iq[:, 1, :], shifts=t, dims=1)
+    
+    if use_circular:
+        for t in range(n_taps):
+            shifted_i = torch.roll(waveform_iq[:, 0, :], shifts=t, dims=1)
+            shifted_q = torch.roll(waveform_iq[:, 1, :], shifts=t, dims=1)
+            a = coeffs_real[:, t].view(-1, 1)
+            b = coeffs_imag[:, t].view(-1, 1)
+            faded[:, 0, :] += (shifted_i * a - shifted_q * b)
+            faded[:, 1, :] += (shifted_i * b + shifted_q * a)
+    else:
+        # Linear Convolution using F.conv1d
+        # We process one batch item at a time or use group convolution
+        # To keep it simple and efficient, we can use group convolution where groups = batch_size
+        # Each channel/batch gets its own unique kernels (taps)
         
-        # Complex multiply: (I + jQ) * (A + jB) = (IA - QB) + j(IB + QA)
-        a = coeffs_real[:, t].view(-1, 1)
-        b = coeffs_imag[:, t].view(-1, 1)
-        
-        faded[:, 0, :] += (shifted_i * a - shifted_q * b)
-        faded[:, 1, :] += (shifted_i * b + shifted_q * a)
-        
+        # waveform_iq is (Batch, 2, N)
+        # We need kernels of size (Batch*2, 1, n_taps)
+        # but the kernels are complex.
+        # This is slightly complex to vectorize perfectly in one call, 
+        # let's use the loop but optimize the I/Q complex logic.
+        for t in range(n_taps):
+            # Zero-padding for linear delay
+            a = coeffs_real[:, t].view(-1, 1)
+            b = coeffs_imag[:, t].view(-1, 1)
+            
+            # Shifted version with zero padding at the start
+            shifted_i = F.pad(waveform_iq[:, 0, :-t], (t, 0)) if t > 0 else waveform_iq[:, 0, :]
+            shifted_q = F.pad(waveform_iq[:, 1, :-t], (t, 0)) if t > 0 else waveform_iq[:, 1, :]
+            
+            faded[:, 0, :] += (shifted_i * a - shifted_q * b)
+            faded[:, 1, :] += (shifted_i * b + shifted_q * a)
+            
     output += fading_scale * faded
     
-    # Power Normalization: Maintain constant average power
-    # Fading can cause deep nulls or peaks; we normalize to keep SNR definition consistent
     energy = torch.mean(output**2, dim=(1, 2), keepdim=True)
     output = output / (torch.sqrt(energy) + 1e-8)
     
@@ -262,14 +312,13 @@ def apply_timing_offset(waveform_iq, max_offset=0):
 def train_autoencoder(args):
     M = 2**args.K
     encoder = Encoder(M, args.n_samples).to(DEVICE)
-    decoder = Decoder(M, args.n_samples).to(DEVICE)
+    decoder = Decoder(M, args.n_samples, args).to(DEVICE)
     
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=args.learning_rate)
 
     # Generate all possible messages for evaluation and plotting
     all_messages_indices = torch.arange(M).long().to(DEVICE)
-    all_messages_one_hot = torch.eye(M).to(DEVICE)[all_messages_indices]
 
     train_losses = []
     ber_history = []
@@ -283,20 +332,21 @@ def train_autoencoder(args):
 
         # Simulate a batch of messages
         messages_indices = torch.randint(0, M, (args.batch_size,)).to(DEVICE)
-        one_hot_messages = torch.eye(M).to(DEVICE)[messages_indices]
 
         optimizer.zero_grad()
 
         # Transmitter
-        encoded_signal = encoder(one_hot_messages)
+        encoded_signal = encoder(messages_indices)
         
-        # Channel
-        distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
-        distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
-        distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
+        # Apply Channel
+        distorted = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, 
+                                          fading_scale=args.fading_scale, 
+                                          use_circular=args.use_circular)
+        distorted = apply_phase_noise(distorted, max_phase_deg=args.max_phase_deg)
+        distorted = apply_frequency_offset(distorted, max_freq_step=args.max_freq_step)
         
         # Timing Offset (New Phase 7) - Signal now becomes (Batch, 2, N + max_offset)
-        distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
+        distorted_signal = apply_timing_offset(distorted, max_offset=args.max_offset)
         
         noisy_signal = add_awgn(distorted_signal, current_snr_db)
         
@@ -315,22 +365,8 @@ def train_autoencoder(args):
 
         train_losses.append(loss.item())
 
-        # Calculate BER (Bit Error Rate) for monitoring
-        _, predicted_messages = torch.max(decoded_logits, 1)
-        
-        # Convert message errors to bit errors
-        # Assuming Gray coding for converting message errors to bit errors would be more accurate
-        # but for simplicity, we'll just count how many bits would be wrong if the message is wrong.
-        num_message_errors = (predicted_messages != messages_indices).sum().item()
-        num_bit_errors = 0
-        
-        if num_message_errors > 0:
-            # A simple approximation: if a message is wrong, assume K/2 bits are wrong on average
-            # For a more precise calculation, you'd convert to binary and compare bit by bit.
-            num_bit_errors = num_message_errors * (args.K / 2) # Average bits wrong per message error
-
-        total_bits = args.batch_size * args.K
-        ber = num_bit_errors / total_bits
+        # Calculate Precision BER (Bitwise)
+        ber, _ = calculate_bitwise_ber(decoded_logits, messages_indices, args.K)
         ber_history.append(ber)
 
         if (epoch + 1) % 50 == 0:
@@ -338,16 +374,16 @@ def train_autoencoder(args):
             print(f"Epoch {epoch+1}/{args.epochs}, SNR: {current_snr_db:.2f} dB, Loss: {loss.item():.4f}, BER: {ber:.4f}, PAPR: {avg_papr:.2f} dB")
 
     print("Training finished!")
-    return encoder, decoder, train_losses, ber_history, snr_history, all_messages_one_hot
+    return encoder, decoder, train_losses, ber_history, snr_history, all_messages_indices
 
 # --- Visualization ---
-def visualize_learned_waveform(encoder, all_messages_one_hot, args):
+def visualize_learned_waveform(encoder, all_messages_indices, args):
     M = 2**args.K
     N_SAMPLES = args.n_samples
     encoder.eval() # Set encoder to evaluation mode
     with torch.no_grad():
         # Get the transmitted signals for all M messages
-        waveform_iq_tensor = encoder(all_messages_one_hot)
+        waveform_iq_tensor = encoder(all_messages_indices)
         avg_papr = get_papr(waveform_iq_tensor)
         print(f"Final average PAPR of learned waveforms: {avg_papr:.2f} dB")
         learned_waveforms_iq = waveform_iq_tensor.cpu().numpy()
@@ -412,12 +448,11 @@ def visualize_waterfall(encoder, args):
     
     # Generate random symbols
     indices = torch.randint(0, M, (num_symbols,)).to(DEVICE)
-    one_hot = torch.eye(M).to(DEVICE)[indices]
     
     encoder.eval()
     with torch.no_grad():
         # Encode (num_symbols, 2, N_SAMPLES)
-        waveforms = encoder(one_hot)
+        waveforms = encoder(indices)
         
         # Reshape to a single continuous stream (2, num_symbols * N_SAMPLES)
         stream = waveforms.transpose(0, 1).reshape(2, -1).unsqueeze(0) # (1, 2, L)
@@ -453,11 +488,11 @@ def visualize_waterfall(encoder, args):
     print(f"Waterfall figure saved to {filename}")
     plt.show()
 
-def visualize_spectrum(encoder, all_messages_one_hot, args):
+def visualize_spectrum(encoder, all_messages_indices, args):
     """Computes and plots the Power Spectral Density of all learned waveforms."""
     encoder.eval()
     with torch.no_grad():
-        waveform_iq = encoder(all_messages_one_hot)
+        waveform_iq = encoder(all_messages_indices)
     
     batch_size, _, n_samples = waveform_iq.size()
     if n_samples <= 1:
@@ -519,6 +554,8 @@ if __name__ == "__main__":
     parser.add_argument('--bw-limit', type=float, default=0.5, help='Allowed bandwidth fraction (0.0-1.0, default: 0.5)')
     parser.add_argument('--n-taps', type=int, default=3, help='Number of multipath taps (default: 3)')
     parser.add_argument('--fading-scale', type=float, default=0.5, help='Strength of fading effect (0.0-1.0, default: 0.5)')
+    parser.add_argument('--use-circular', action='store_true', help='Use circular convolution for fading (OFDM-like)')
+    parser.set_defaults(use_circular=False)
     parser.add_argument('--papr-penalty', type=float, default=1.0, help='Weight of the PAPR constraint (default: 1.0)')
     parser.add_argument('--prefix', type=str, default="", help='Prefix for output filenames')
     parser.add_argument('--packet-bytes', type=int, default=20, help='Number of bytes for waterfall visualization (default: 20)')
@@ -528,7 +565,7 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
 
-    encoder_model, decoder_model, losses, bers, snrs, all_msg_one_hot = train_autoencoder(args)
+    encoder_model, decoder_model, losses, bers, snrs, all_msg_indices = train_autoencoder(args)
 
     M = 2**args.K
     plt.figure(figsize=(12, 5))
@@ -567,10 +604,10 @@ if __name__ == "__main__":
     plt.show()
 
     # Visualize the learned waveforms (or constellations if N_SAMPLES=1)
-    visualize_learned_waveform(encoder_model, all_msg_one_hot, args)
+    visualize_learned_waveform(encoder_model, all_msg_indices, args)
     
     # Visualize the spectrum
-    visualize_spectrum(encoder_model, all_msg_one_hot, args)
+    visualize_spectrum(encoder_model, all_msg_indices, args)
 
     # Visualize the waterfall
     visualize_waterfall(encoder_model, args)
@@ -588,20 +625,19 @@ if __name__ == "__main__":
     with torch.no_grad():
         for _ in tqdm(range(num_test_batches), desc="BER Evaluation"):
             messages_indices = torch.randint(0, M, (args.batch_size,)).to(DEVICE)
-            one_hot_messages = torch.eye(M).to(DEVICE)[messages_indices]
 
-            encoded_signal = encoder_model(one_hot_messages)
-            distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, fading_scale=args.fading_scale)
+            encoded_signal = encoder_model(messages_indices)
+            distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, 
+                                                     fading_scale=args.fading_scale, 
+                                                     use_circular=args.use_circular)
             distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
             distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
             distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
             noisy_signal = add_awgn(distorted_signal, test_snr_db)
             decoded_logits = decoder_model(noisy_signal)
 
-            _, predicted_messages = torch.max(decoded_logits, 1)
-            
-            num_message_errors = (predicted_messages != messages_indices).sum().item()
-            total_bit_errors += num_message_errors * (args.K / 2) # Approximation
+            ber, bit_errors = calculate_bitwise_ber(decoded_logits, messages_indices, args.K)
+            total_bit_errors += bit_errors
             total_bits_evaluated += args.batch_size * args.K
 
     final_ber = total_bit_errors / total_bits_evaluated
