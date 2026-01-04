@@ -200,6 +200,55 @@ uv run python main.py   -K 4 -N 512   --epochs 3000   --max-offset 64   --fading
 ![Spectrum K4](output/no_par_1_spectrum_K4_N512_BW1.0.png)
 ![Waterfall of a 20 bytes packet](output/no_par_1_waterfall_K4_N512.png)
 
+
+### 7. PAPR limit + DC penalty
+
+Previously I did not implement DC penalty resulting in some messages being completly constant which is pretty unrealistic. Adding it resulted in nicer looking waveforms even if still "chaotic".
+Also the autoencoder was over-learning the worst cases leading to good BER at very low level 
+but bad BER at high SNR so jitter on both fading and SNR has been added to overcome that.
+
+The final **BER at -15dB is 0.207** with a **PAPR of 0.49dB**.
+
+```bash
+uv run python main.py   -K 4 -N 384   --epochs 3000   --max-offset 64 --fading-jitter  --fading-scale 0.5 --n-taps 3 --bw-penalty 1.5 --bw-limit 0.5   --papr-penalty 5.0 --dc-penalty 1.0 --rolloff 0.33   --batch-size 512  --snr-start 8 --snr-end -15 --use-circular --prefix dc_penalty_3
+```
+
+[BER Results K4](output/dc_penalty_3_results_K4_M16_N384_SNR8to-15.png)
+![Waveforms K4](output/dc_penalty_3_waveforms_K4_M16_N384.png)
+![Spectrum K4](output/dc_penalty_3_spectrum_K4_N384_BW0.5.png)
+![Waterfall of a 20 bytes packet](output/dc_penalty_3_waterfall_K4_N384.png)
+
+| SNR (dB) | BER under fading scale of 0.5 |
+|----------|-------------------------------|
+|        8 | 0.041377 |
+|        7 | 0.040796 |
+|        6 | 0.040947 |
+|        5 | 0.041602 |
+|        4 | 0.040527 |
+|        3 | 0.040234 |
+|        2 | 0.040820 |
+|        1 | 0.042051 |
+|        0 | 0.041968 |
+|       -1 | 0.043037 |
+|       -2 | 0.041304 |
+|       -3 | 0.043662 |
+|       -4 | 0.043389 |
+|       -5 | 0.044038 |
+|       -6 | 0.044990 |
+|       -7 | 0.047661 |
+|       -8 | 0.050317 |
+|       -9 | 0.053682 |
+|      -10 | 0.062622 |
+|      -11 | 0.076465 |
+|      -12 | 0.096016 |
+|      -13 | 0.123608 |
+|      -14 | 0.162798 |
+|      -15 | 0.207100 |
+
+ML Models are saved  [encoder.pth](output/dc_penalty_3_encoder.pth) and [decoder.pth](output/dc_penalty_3_decoder.pth).
+I also saved the IQ as a SigMF capture with annotations: [data](output/dc_penalty_3_learned_waveforms.sigmf-data) [meta](output/dc_penalty_3_learned_waveforms.sigmf-meta).
+
+
 ---
 
 ## Machine Learning Detailed Architecture

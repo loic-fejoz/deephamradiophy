@@ -344,6 +344,21 @@ def get_spectral_penalty(waveform_iq, bw_limit=0.5):
     penalty = out_energy / (total_energy + 1e-8)
     return penalty
 
+def get_dc_penalty(waveform_iq):
+    """
+    Penalizes the DC component (mean of the signal).
+    DC power = |mean(I)|^2 + |mean(Q)|^2
+    """
+    # Mean over time dimension
+    dc_i = torch.mean(waveform_iq[:, 0, :], dim=1)
+    dc_q = torch.mean(waveform_iq[:, 1, :], dim=1)
+    
+    # Square magnitude (power) of DC component
+    dc_power = dc_i**2 + dc_q**2
+    
+    # Return average across batch
+    return torch.mean(dc_power)
+
 def get_papr(waveform_iq):
     """
     Computes the Peak-to-Average Power Ratio (PAPR) in dB.
@@ -450,6 +465,119 @@ def apply_timing_offset(waveform_iq, max_offset=0):
         
     return output
 
+# --- Post-Training Utilities ---
+
+def evaluate_at_snr(encoder, decoder, snr_db, args, device, num_batches=100):
+    """Evaluates BER for a specific SNR."""
+    M = 2**args.K
+    total_bit_errors = 0
+    total_bits_evaluated = 0
+    encoder.eval()
+    decoder.eval()
+    
+    with torch.no_grad():
+        for _ in range(num_batches):
+            messages_indices = torch.randint(0, M, (args.batch_size,)).to(device)
+            
+            encoded_signal = encoder(messages_indices)
+            
+            # Channel impairments (SNR, Fading, Offsets) matches curriculum
+            distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, 
+                                                     fading_scale=args.fading_scale, 
+                                                     use_circular=args.use_circular)
+            distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
+            distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
+            distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
+            noisy_signal = add_awgn(distorted_signal, snr_db)
+            decoded_logits = decoder(noisy_signal)
+            ber, bit_errors = calculate_bitwise_ber(decoded_logits, messages_indices, args.K)
+            total_bit_errors += bit_errors
+            total_bits_evaluated += args.batch_size * args.K
+            
+    return total_bit_errors / total_bits_evaluated
+
+def generate_ber_table(encoder, decoder, args, device):
+    """Generates and prints a Markdown table of BER vs SNR and saves a plot."""
+    print(f"\n| SNR (dB) | BER under fading scale {args.fading_scale} |")
+    print("|----------|-------------------------------|")
+    
+    start = int(max(args.snr_start, args.snr_end))
+    end = int(min(args.snr_start, args.snr_end))
+    
+    snrs = []
+    bers = []
+    
+    for snr in range(start, end - 1, -1):
+        ber = evaluate_at_snr(encoder, decoder, float(snr), args, device)
+        print(f"| {snr:8d} | {ber:.6f} |")
+        snrs.append(snr)
+        bers.append(ber)
+        
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    plt.semilogy(snrs, bers, 'b-o', markersize=4, label=f'Fading Scale: {args.fading_scale}')
+    plt.grid(True, which="both", ls="-", alpha=0.5)
+    plt.xlabel('SNR (dB)')
+    plt.ylabel('Bit Error Rate (BER)')
+    plt.title(f'BER vs SNR Waterfall (K={args.K}, N={args.n_samples})')
+    plt.legend()
+    
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    plot_filename = f"output/{prefix_str}ber_db_vs_snr.png"
+    plt.savefig(plot_filename)
+    print(f"\nBER waterfall plot saved to {plot_filename}")
+    
+    if not args.no_gui:
+        plt.show()
+    else:
+        plt.close()
+
+def export_to_sigmf(encoder, args):
+    """Exports learned waveforms to SigMF format."""
+    import json
+    import time
+    
+    M = 2**args.K
+    encoder.eval()
+    device = next(encoder.parameters()).device
+    with torch.no_grad():
+        all_indices = torch.arange(M).long().to(device)
+        waveforms = encoder(all_indices).cpu().numpy() # (M, 2, N_SAMPLES)
+        
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    data_filename = f"output/{prefix_str}learned_waveforms.sigmf-data"
+    meta_filename = f"output/{prefix_str}learned_waveforms.sigmf-meta"
+    
+    # Flatten and interleave I/Q: (M, 2, N) -> (M, N, 2) -> (M*N*2,)
+    iq_interleaved = waveforms.transpose(0, 2, 1).flatten().astype(np.float32)
+    
+    with open(data_filename, 'wb') as f:
+        f.write(iq_interleaved.tobytes())
+        
+    meta = {
+        "global": {
+            "core:datatype": "cf32_le",
+            "core:sample_rate": 1000000,
+            "core:version": "1.0.0",
+            "core:description": f"Learned waveforms for K={args.K}, N={args.n_samples} PHY Autoencoder",
+            "core:recorder": "Deep-HAM Radio PHY Autoencoder",
+            "core:datetime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        },
+        "captures": [{ "core:sample_start": 0, "core:frequency": 433000000 }],
+        "annotations": []
+    }
+    
+    for i in range(M):
+        meta["annotations"].append({
+            "core:sample_start": i * args.n_samples,
+            "core:sample_count": args.n_samples,
+            "core:label": f"Message {i}"
+        })
+        
+    with open(meta_filename, 'w') as f:
+        json.dump(meta, f, indent=4)
+    print(f"SigMF capture saved to {data_filename} and {meta_filename}")
+
 # --- Training Loop ---
 def train_autoencoder(args):
     M = 2**args.K
@@ -469,9 +597,13 @@ def train_autoencoder(args):
     snr_history = []
 
     for epoch in range(args.epochs):
-        # --- Noise Curriculum ---
-        current_snr_db = args.snr_start - (args.snr_start - args.snr_end) * (epoch / (args.epochs - 1))
-        current_snr_db = max(args.snr_end, min(args.snr_start, current_snr_db))
+        # --- Noise Curriculum with Jitter ---
+        # Target curriculum SNR
+        target_snr = args.snr_start - (args.snr_start - args.snr_end) * (epoch / (args.epochs - 1))
+        
+        # Jitter the SNR to force robustness across a wider range
+        current_snr_db = np.random.uniform(target_snr - args.snr_jitter, target_snr + args.snr_jitter)
+        
         snr_history.append(current_snr_db)
 
         # Simulate a batch of messages
@@ -482,9 +614,14 @@ def train_autoencoder(args):
         # Transmitter
         encoded_signal = encoder(messages_indices)
         
+        # Decide fading scale for this batch
+        cur_fading = args.fading_scale
+        if args.fading_jitter:
+            cur_fading = np.random.uniform(0.0, args.fading_scale)
+
         # Apply Channel
         distorted = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, 
-                                          fading_scale=args.fading_scale, 
+                                          fading_scale=cur_fading, 
                                           use_circular=args.use_circular)
         distorted = apply_phase_noise(distorted, max_phase_deg=args.max_phase_deg)
         distorted = apply_frequency_offset(distorted, max_freq_step=args.max_freq_step)
@@ -502,9 +639,13 @@ def train_autoencoder(args):
         
         bw_penalty = get_spectral_penalty(encoded_signal, bw_limit=args.bw_limit)
         papr_penalty = get_papr_penalty(encoded_signal)
+        dc_penalty = get_dc_penalty(encoded_signal)
+        
         # Calculate total loss with penalty warmup (Phase 11/12 discovery aid)
         warmup = min(1.0, (epoch + 1) / 1000.0)
-        loss = ce_loss + warmup * (args.bw_penalty * bw_penalty + args.papr_penalty * papr_penalty)
+        loss = ce_loss + warmup * (args.bw_penalty * bw_penalty + 
+                                   args.papr_penalty * papr_penalty + 
+                                   args.dc_penalty * dc_penalty)
         
         loss.backward()
         optimizer.step()
@@ -517,7 +658,7 @@ def train_autoencoder(args):
 
         if (epoch + 1) % 50 == 0:
             avg_papr = get_papr(encoded_signal)
-            print(f"Epoch {epoch+1}/{args.epochs}, SNR: {current_snr_db:.2f} dB, Loss: {loss.item():.4f}, BER: {ber:.4f}, PAPR: {avg_papr:.2f} dB")
+            print(f"Epoch {epoch+1}/{args.epochs}, SNR: {current_snr_db:.2f} dB, Loss: {loss.item():.4f}, BER: {ber:.4f}, PAPR: {avg_papr:.2f} dB, DC Penalty: {dc_penalty:.2f}, BW Penalty: {bw_penalty:.2f}")
 
     print("Training finished!")
     return encoder, decoder, train_losses, ber_history, snr_history, all_messages_indices
@@ -753,6 +894,9 @@ if __name__ == "__main__":
     parser.add_argument('--use-circular', action='store_true', help='Use circular convolution for fading (OFDM-like)')
     parser.set_defaults(use_circular=False)
     parser.add_argument('--papr-penalty', type=float, default=1.0, help='Weight of the PAPR constraint (default: 1.0)')
+    parser.add_argument('--dc-penalty', type=float, default=0.0, help='Weight of the DC blocking penalty (default: 0.0)')
+    parser.add_argument('--snr-jitter', type=float, default=2.0, help='Range of SNR randomization in dB during training (default: 2.0)')
+    parser.add_argument('--fading-jitter', action='store_true', help='Randomize fading scale between 0 and --fading-scale per batch (default: False)')
     parser.add_argument('--prefix', type=str, default="", help='Prefix for output filenames')
     parser.add_argument('--packet-bytes', type=int, default=20, help='Number of bytes for waterfall visualization (default: 20)')
     parser.add_argument('--max-offset', type=int, default=0, help='Max random timing offset in samples (default: 0)')
@@ -823,33 +967,18 @@ if __name__ == "__main__":
     # Visualize the waterfall
     visualize_waterfall(encoder_model, args)
 
-    # Example of how to evaluate BER at a specific SNR after training
-    print("\nEvaluating BER at target SNR_END_DB:")
-    test_snr_db = args.snr_end 
-    num_test_batches = 100
-    total_bit_errors = 0
-    total_bits_evaluated = 0
+    # Deployment and Analysis
+    # Save models
+    prefix_str = f"{args.prefix}_" if args.prefix else ""
+    enc_path = f"output/{prefix_str}encoder.pth"
+    dec_path = f"output/{prefix_str}decoder.pth"
+    torch.save(encoder_model.state_dict(), enc_path)
+    torch.save(decoder_model.state_dict(), dec_path)
+    print(f"Models saved to {enc_path} and {dec_path}")
 
-    encoder_model.eval()
-    decoder_model.eval()
+    # SigMF Export
+    export_to_sigmf(encoder_model, args)
 
-    with torch.no_grad():
-        for _ in tqdm(range(num_test_batches), desc="BER Evaluation"):
-            messages_indices = torch.randint(0, M, (args.batch_size,)).to(DEVICE)
-
-            encoded_signal = encoder_model(messages_indices)
-            distorted_signal = apply_multipath_fading(encoded_signal, n_taps=args.n_taps, 
-                                                     fading_scale=args.fading_scale, 
-                                                     use_circular=args.use_circular)
-            distorted_signal = apply_phase_noise(distorted_signal, max_phase_deg=args.max_phase_deg)
-            distorted_signal = apply_frequency_offset(distorted_signal, max_freq_step=args.max_freq_step)
-            distorted_signal = apply_timing_offset(distorted_signal, max_offset=args.max_offset)
-            noisy_signal = add_awgn(distorted_signal, test_snr_db)
-            decoded_logits = decoder_model(noisy_signal)
-
-            ber, bit_errors = calculate_bitwise_ber(decoded_logits, messages_indices, args.K)
-            total_bit_errors += bit_errors
-            total_bits_evaluated += args.batch_size * args.K
-
-    final_ber = total_bit_errors / total_bits_evaluated
-    print(f"Final BER at {test_snr_db:.2f} dB: {final_ber:.6f}")
+    # Final detailed SNR vs BER table
+    print(f"\nEvaluating detailed BER table from {args.snr_start} to {args.snr_end} dB:")
+    generate_ber_table(encoder_model, decoder_model, args, DEVICE)
