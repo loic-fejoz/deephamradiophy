@@ -144,14 +144,17 @@ class Encoder(nn.Module):
         self.N_SAMPLES = N_SAMPLES 
         self.args = args
         
-        # Use nn.Embedding to map message index to a latent vector
+        # Architecture Parameters
         self.latent_dim = 16
+        self.conv_dim = 32
+        
+        # Use nn.Embedding to map message index to a latent vector
         self.embedding = nn.Embedding(M, self.latent_dim)
         
         self.upsample = nn.Sequential(
-            nn.ConvTranspose1d(self.latent_dim, 32, kernel_size=N_SAMPLES),
+            nn.ConvTranspose1d(self.latent_dim, self.conv_dim, kernel_size=N_SAMPLES),
             nn.ReLU(),
-            nn.Conv1d(32, 2, kernel_size=3, padding=1),
+            nn.Conv1d(self.conv_dim, 2, kernel_size=3, padding=1),
         )
 
     def forward(self, messages_indices):
@@ -184,7 +187,10 @@ class Decoder(nn.Module):
         self.M = M
         self.N_SAMPLES = N_SAMPLES
         self.args = args
-        self.hidden_dim = 64
+        
+        # Architecture Parameters
+        self.cnn_dim = 64
+        self.gru_dim = 2 * 64
         
         # Phase 12: Matched Filter Front-end
         if self.args.rolloff > 0:
@@ -198,16 +204,17 @@ class Decoder(nn.Module):
         self.stn = STN1D(2, N_SAMPLES + args.max_offset, N_SAMPLES)
 
         self.cnn = nn.Sequential(
-            nn.Conv1d(2, 64, kernel_size=7, padding=3),
+            nn.Conv1d(2, self.cnn_dim, kernel_size=7, padding=3),
             nn.ReLU(),
-            nn.Conv1d(64, 64, kernel_size=7, padding=3),
+            nn.Conv1d(self.cnn_dim, self.cnn_dim, kernel_size=7, padding=3),
             nn.ReLU(),
         )
         # GRU for sequence modeling
-        self.gru = nn.GRU(input_size=64, hidden_size=64, batch_first=True, bidirectional=True)
-        # Attention for selective pooling
-        self.pool = AttentionPooling(64 * 2)
-        self.fc = nn.Linear(64 * 2, M)
+        # input_size matches the output channels of the last CNN layer
+        self.gru = nn.GRU(input_size=self.cnn_dim, hidden_size=self.gru_dim, batch_first=True, bidirectional=True)
+        # Attention for selective pooling (multiplier 2 for bidirectional GRU)
+        self.pool = AttentionPooling(self.gru_dim * 2)
+        self.fc = nn.Linear(self.gru_dim * 2, M)
 
     def forward(self, x_noisy):
         # x_noisy: (Batch, 2, L)

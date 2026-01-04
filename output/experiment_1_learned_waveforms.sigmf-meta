@@ -1,0 +1,98 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:sample_rate": 1000000,
+        "core:version": "1.0.0",
+        "core:description": "Learned waveforms for K=4, N=256 PHY Autoencoder",
+        "core:recorder": "Deep-HAM Radio PHY Autoencoder",
+        "core:datetime": "2026-01-04T22:02:16Z"
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 433000000
+        }
+    ],
+    "annotations": [
+        {
+            "core:sample_start": 0,
+            "core:sample_count": 256,
+            "core:label": "Message 0"
+        },
+        {
+            "core:sample_start": 256,
+            "core:sample_count": 256,
+            "core:label": "Message 1"
+        },
+        {
+            "core:sample_start": 512,
+            "core:sample_count": 256,
+            "core:label": "Message 2"
+        },
+        {
+            "core:sample_start": 768,
+            "core:sample_count": 256,
+            "core:label": "Message 3"
+        },
+        {
+            "core:sample_start": 1024,
+            "core:sample_count": 256,
+            "core:label": "Message 4"
+        },
+        {
+            "core:sample_start": 1280,
+            "core:sample_count": 256,
+            "core:label": "Message 5"
+        },
+        {
+            "core:sample_start": 1536,
+            "core:sample_count": 256,
+            "core:label": "Message 6"
+        },
+        {
+            "core:sample_start": 1792,
+            "core:sample_count": 256,
+            "core:label": "Message 7"
+        },
+        {
+            "core:sample_start": 2048,
+            "core:sample_count": 256,
+            "core:label": "Message 8"
+        },
+        {
+            "core:sample_start": 2304,
+            "core:sample_count": 256,
+            "core:label": "Message 9"
+        },
+        {
+            "core:sample_start": 2560,
+            "core:sample_count": 256,
+            "core:label": "Message 10"
+        },
+        {
+            "core:sample_start": 2816,
+            "core:sample_count": 256,
+            "core:label": "Message 11"
+        },
+        {
+            "core:sample_start": 3072,
+            "core:sample_count": 256,
+            "core:label": "Message 12"
+        },
+        {
+            "core:sample_start": 3328,
+            "core:sample_count": 256,
+            "core:label": "Message 13"
+        },
+        {
+            "core:sample_start": 3584,
+            "core:sample_count": 256,
+            "core:label": "Message 14"
+        },
+        {
+            "core:sample_start": 3840,
+            "core:sample_count": 256,
+            "core:label": "Message 15"
+        }
+    ]
+}

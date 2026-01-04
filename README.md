@@ -249,6 +249,62 @@ ML Models are saved  [encoder.pth](output/dc_penalty_3_encoder.pth) and [decoder
 I also saved the IQ as a SigMF capture with annotations: [data](output/dc_penalty_3_learned_waveforms.sigmf-data) [meta](output/dc_penalty_3_learned_waveforms.sigmf-meta).
 
 
+### 8. GRU dimension increase to 128
+
+Previously I was stuck at some BER of ~0.41 even at high SNR. I increased the **GRU dimension to 128** and it allowed to reach a BER of ~0.2 at -15dB SNR with even less samples/symbols!
+
+```bash
+uv run python main.py   -K 4 -N 256 --epochs 3000   --max-offset 64 --fading-jitter  --fading-scale 0.5 --n-taps 3 --bw-penalty 1.5 --bw-limit 0.5   --papr-penalty 5.0 --dc-penalty 1.0 --rolloff 0.33   --batch-size 512  --snr-start 8 --snr-end -15 --prefix experiment_1
+```
+
+[BER Results K4](output/experiment_1_results_K4_M16_N256_SNR8to-15.png)
+![Waveforms K4](output/experiment_1_waveforms_K4_M16_N256.png)
+![Spectrum K4](output/experiment_1_spectrum_K4_N256_BW0.5.png)
+![Waterfall of a 20 bytes packet](output/experiment_1_waterfall_K4_N256.png)
+
+ML Models are saved: [encoder.pth](output/experiment_1_encoder.pth) and [decoder.pth](output/experiment_1_decoder.pth).
+I also saved the IQ as a SigMF capture with annotations: [data](output/experiment_1_learned_waveforms.sigmf-data) + [meta](output/experiment_1_learned_waveforms.sigmf-meta).
+
+As you can see in next figure, the BER now exhibits a much cleaner curve over SNR:
+* Stable Zone: +8 dB to -3 dB (BER $\approx$ 0.006 - 0.008)
+* Knee: -4 dB to -9 dB (BER starts climbing from 0.01 to 0.027)
+* Collapse: Below -10 dB.
+
+I believe with that I have built a highly robust, spectral-efficient neural modem.
+I was targetting a BER of 0.01 at -15dB SNR. I am really close to it now...
+I should probably compute what would be the actual bps of this radio PHY layer
+and even maybe test it on the air.
+
+![BER vs SNR Curve](output/experiment_1_ber_db_vs_snr.png)
+
+| SNR (dB) | BER under fading scale 0.5 |
+|----------|-------------------------------|
+|        8 | 0.005918 |
+|        7 | 0.005928 |
+|        6 | 0.005625 |
+|        5 | 0.006748 |
+|        4 | 0.006553 |
+|        3 | 0.006348 |
+|        2 | 0.006978 |
+|        1 | 0.006631 |
+|        0 | 0.007881 |
+|       -1 | 0.008228 |
+|       -2 | 0.007993 |
+|       -3 | 0.008418 |
+|       -4 | 0.009839 |
+|       -5 | 0.010391 |
+|       -6 | 0.013257 |
+|       -7 | 0.016309 |
+|       -8 | 0.019907 |
+|       -9 | 0.027607 |
+|      -10 | 0.035488 |
+|      -11 | 0.054028 |
+|      -12 | 0.078384 |
+|      -13 | 0.112505 |
+|      -14 | 0.157642 |
+|      -15 | 0.209819 |
+
+
 ---
 
 ## Machine Learning Detailed Architecture
