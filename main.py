@@ -16,6 +16,8 @@ try:
 except ImportError:
     HAS_TORCHVIEW = False
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def get_rrc_pulse(n_samples, rolloff, samples_per_symbol, filter_span):
     """
     Generates a Root-Raised Cosine (RRC) impulse response.
@@ -916,7 +918,6 @@ if __name__ == "__main__":
     if args.no_gui:
         plt.switch_backend('Agg')
 
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
 
     if args.draw_graph:
